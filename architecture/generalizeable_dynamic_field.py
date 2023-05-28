@@ -58,11 +58,10 @@ class Dynamics(nn.Module):
         self.velocity_field = velocity_field
         self.time_indices = time_indices
 
-    def forward(self, t, state):
+    def forward(self, t, x):
         t = (self.time_indices + t).unsqueeze(1)
-        x, features = state[:, :3], state[:, 3:]
         velocity = self.velocity_field(t,x)
-        return torch.cat([velocity, torch.zeros_like(features)], dim=1)
+        return velocity
 
 
 class PointTrajectory(nn.Module):
@@ -100,9 +99,9 @@ class PointTrajectory(nn.Module):
             torch.Tensor: The 2D projection of the trajectory. Shape: (batch_size, time_span, 2).
         """
         n_samples = initial_point.shape[1]
-        features_encoded_expanded = repeat(features,'features -> batch n_samples features',n_samples = n_samples,batch=initial_point.shape[0])
+        # features_encoded_expanded = repeat(features,'features -> batch n_samples features',n_samples = n_samples,batch=initial_point.shape[0])
         timespan = torch.linspace(-1, 1, steps=time_span).to(features.device)
-        initial_point = torch.cat([initial_point, features_encoded_expanded], dim=-1)
+        # initial_point = torch.cat([initial_point, features_encoded_expanded], dim=-1)
         initial_point = rearrange(initial_point, 'batch n_samples xyz -> (batch n_samples) xyz')
         time_indices = rearrange(repeat(time_indices, 'batch  -> batch n_samples', n_samples=n_samples),'batch n_samples -> (batch n_samples)')
         self.dynamics.time_indices = time_indices

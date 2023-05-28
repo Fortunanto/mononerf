@@ -12,6 +12,9 @@ from einops import *
 from loss import *
 import wandb
 import copy
+import torch
+import torch.autograd as autograd
+from torchviz import make_dot
 
 # PYZSHCOMPLETE_OK
 def check_parameters_changed(model, prev_parameters):
@@ -30,16 +33,17 @@ def train(ray_bender,video_downsampler,nerf, train_loader, optimizer, criterion,
     num_batches = 0
 
     prev_parameters = None
-    ray_bender.train()
+    # ray_bender.train()
     criterion = torch.nn.MSELoss()
     for epoch in range(config.epochs):
+        ray_bender.train()
+
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch+1}/{config.epochs}") as pbar:
             for batch_idx, (index, target) in enumerate(tqdm(train_loader)):
                 # optimi/zer.zero_grad()
                 target = target.to(device)
                 image_indices,x,y = index
                 image_indices = image_indices.unsqueeze(1).to(device="cuda")  # reshape from (n,) to (n, 1)
-                # image_indices.requires_grad = True
                 image_indices = torch.cat((image_indices-1,image_indices,image_indices+1),dim=1)
                 image_indices_reshaped = image_indices.reshape(-1)
                 pose,intrinsics = train_loader.dataset.get_pose_intrinsics(image_indices_reshaped)
@@ -47,22 +51,18 @@ def train(ray_bender,video_downsampler,nerf, train_loader, optimizer, criterion,
                 flows = F.interpolate(flows,size=(240,360))
                 pose,intrinsics = pose.reshape(*image_indices.shape,4,4) , intrinsics.reshape(*image_indices.shape,4,4)
                 rays_o,rays_d = get_rays_from_points((x,y),intrinsics[:,1],pose[:,1])
-                image_indices_float = image_indices.float()
-                image_indices_float.requires_grad = True
 
                 points = get_points_along_rays(rays_o,rays_d,config.near,config.far,config.linear_displacement,config.perturb,config.n_samples)
-                trajectory = ray_bender(points,video_downsampler(train_loader.dataset.get_video_embedding()),intrinsics,pose,image_indices_float[:,1],time_span=config.time_span)
+                trajectory = ray_bender(points,video_downsampler(train_loader.dataset.get_video_embedding()),intrinsics,pose,image_indices[:,1],time_span=config.time_span)
                 # assert False, f"trajectory.shape: {trajectory.shape}"
                 flow_loss = supervise_flows(trajectory,flows[image_indices[:,1],:,x,y],pose[:,1],intrinsics[:,1],criterion)
                 # assert False, f"ray_bender.parameters(): {list(ray_bender.parameters())}"
-
-                flow_loss.backward()
-                for param in ray_bender.parameters():
-                    print(f"param.grad {param.grad}")
+                flow_loss.backward(retain_graph=True)
+                dot = make_dot(flow_loss, params=dict(loss=flow_loss))
+                dot.render(filename='gradient_graph_2', format='png')
 
                 optimizer.step()
-
-                # wandb.log({"flow_loss": flow_loss.item()})
+                # # wandb.log({"flow_loss": flow_loss.item()})
 
                 epoch_flow_loss += flow_loss.item()
                 num_batches += 1
@@ -79,14 +79,7 @@ def train(ray_bender,video_downsampler,nerf, train_loader, optimizer, criterion,
                 # loss = criterion(output, target)
                 # loss.backward()
                 # optimizer.step()
-            parameters_changed = check_parameters_changed(ray_bender, prev_parameters)
-            if parameters_changed:
-                print("Parameters have changed!")
-            else:
-                print("Parameters have not changed.")
-
             # Update previous parameters
-            prev_parameters = copy.deepcopy(ray_bender.state_dict())
             epoch_flow_loss /= num_batches
             # wandb.log({"epoch_flow_loss": epoch_flow_loss})
             epoch_flow_loss = 0
@@ -114,7 +107,9 @@ def main():
     # wandb.init(project=config.exp_group_name, config=config)
     # wandb.watch(ray_bending_estimator)
     # wandb.watch(video_downsampler)
-    optimizer = torch.optim.Adam(ray_bending_estimator.parameters(), lr=config.lr)
+    optimizer = torch.optim.SGD(ray_bending_estimator.parameters(), lr=config.lr)
+    for param in ray_bending_estimator.parameters():
+        param.requires_grad=True
     # assert False, f"ray_bending_estimator.parameters() {ray_bending_estimator.parameters()}"
     train(ray_bending_estimator,video_downsampler,None,dataloader,optimizer,None,config,"cuda")
     pass

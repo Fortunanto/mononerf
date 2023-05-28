@@ -155,6 +155,8 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
         h,w=240,360
         self.n_images = self.images.shape[0]
         self.intrinsics,self.poses = torch.load(os.path.join(self.data_dir, "intrinsics.pt")),torch.load(os.path.join(self.data_dir, "pose.pt"))
+        self.intrinsics.requires_grad = False
+        self.poses.requires_grad = False
         # self.indices = list(itertools.product(range(1,self.n_images-1),range(h),range(w)))
         self.indices = list(itertools.product(range(1,3),range(2),range(2)))
 
