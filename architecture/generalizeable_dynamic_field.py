@@ -83,7 +83,7 @@ class PointTrajectory(nn.Module):
         self.time_encoding_dim = time_encoding_dim
         self.time_indices = None
         self.dynamics = Dynamics(self.velocity_field, self.time_indices)
-    
+
     def forward(self, initial_point, features,intrinsics,poses,time_indices,time_span=100):
         """
         Calculates the trajectory of the points over time and projects them into 2D space.
@@ -106,14 +106,8 @@ class PointTrajectory(nn.Module):
         initial_point = rearrange(initial_point, 'batch n_samples xyz -> (batch n_samples) xyz')
         time_indices = rearrange(repeat(time_indices, 'batch  -> batch n_samples', n_samples=n_samples),'batch n_samples -> (batch n_samples)')
         self.dynamics.time_indices = time_indices
-        # trajectory = torchdiffeq.odeint_adjoint(self.dynamics, initial_point, timespan,rtol=1e-3,atol=1e-3)[:, :, :3]
-        t = (time_indices + 0).unsqueeze(1)
-        x, features = initial_point[:, :3], initial_point[:, 3:]
-        velocity = self.velocity_field(t,x)
-        trajectory = repeat(velocity,'(batch n_samples) xyz -> batch n_samples time_dim xyz',n_samples=n_samples,time_dim=3)
-        # assert False, f"velocity.shape {velocity.shape} initial_point.shape {initial_point.shape} x.shape {x.shape} features.shape {features.shape} "
-        # assert False, f"velocity.shape {velocity.shape} initial_point.shape {initial_point.shape} x.shape {x.shape} features.shape {features.shape} "
-        # trajectory = repeat(,'batch n_samples features -> batch n_samples time_dim features',n_samples=n_samples,time_dim=3)
+        trajectory = torchdiffeq.odeint_adjoint(self.dynamics, initial_point, timespan,rtol=1e-3,atol=1e-3)[:, :, :3]
+        trajectory = rearrange(trajectory, 'time (batch n_samples) xyz -> batch n_samples time xyz',n_samples = n_samples)
         # assert False, f"initial_point[:4,:3] {initial_point[:4,:3]} velocities[:4] {velocities[:4,0]}"
         return trajectory
 
