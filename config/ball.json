@@ -1,0 +1,18 @@
+{
+    "data_folder": "data/ball",
+    "image_size":[240,360],
+    "checkpoint": "checkpoints/ball",
+    "batch_size": 1024,
+    "num_workers": 4,
+    "near":0.1,
+    "far":1.0,
+    "perturb":0.1,
+    "linear_displacement":true,
+    "time_span":3,
+    "epochs": 100000,
+    "lr": 1e-6,
+    "experiment_name": "ball",
+    "exp_group_name": "mononerf",
+    "n_samples":4
+}
+
