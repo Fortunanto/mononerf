@@ -9,33 +9,33 @@ def adjust_to_image_coordinates(points_2d, img_size):
     return points_2d
 
 def interpolate_feature_map(points,h,w,indices,features):
-        interp,mask = get_interpolation_indices(points=points, h=h, w=w)
-        mask = rearrange(mask,'time b -> (time b)')
-        interp = rearrange(interp.to(features.device),'time b bounds xy -> (time b) bounds xy')
-        # assert False, f"interp shape: {interp.shape}"
-        points = rearrange(points,'time b xy -> (time b) xy')
-        indices = indices.reshape(-1).to(features.device)
-        # assert False, f"indices shape: {indices.shape} interp shape: {interp.shape}"
-        x0y0 = interp[:,0]
-        x0y1 = interp[:,1]
-        x1y0 = interp[:,2]
-        x1y1 = interp[:,3]
-        
-        features_topleft = features[indices,:,x0y0[:,0],x0y0[:,1]].to(points.device)
-        features_topright = features[indices,:,x0y1[:,0],x0y1[:,1]].to(points.device)
-        features_bottomleft = features[indices,:,x1y0[:,0],x1y0[:,1]].to(points.device)
-        features_bottomright = features[indices,:,x1y1[:,0],x1y1[:,1]].to(points.device)
-        x0y0 = x0y0.to(points.device)
-        x0y1 = x0y1.to(points.device)
-        x1y0 = x1y0.to(points.device)
-        x1y1 = x1y1.to(points.device)
+    interp,mask = get_interpolation_indices(points=points, h=h, w=w)
+    mask = rearrange(mask,'time b -> (time b)')
+    interp = rearrange(interp.to(features.device),'time b bounds xy -> (time b) bounds xy')
+    # assert False, f"interp shape: {interp.shape}"
+    points = rearrange(points,'time b xy -> (time b) xy')
+    indices = indices.reshape(-1).to(features.device)
+    # assert False, f"indices shape: {indices.shape} interp shape: {interp.shape}"
+    x0y0 = interp[:,0]
+    x0y1 = interp[:,1]
+    x1y0 = interp[:,2]
+    x1y1 = interp[:,3]
+    
+    features_topleft = features[indices,:,x0y0[:,0],x0y0[:,1]].to(points.device)
+    features_topright = features[indices,:,x0y1[:,0],x0y1[:,1]].to(points.device)
+    features_bottomleft = features[indices,:,x1y0[:,0],x1y0[:,1]].to(points.device)
+    features_bottomright = features[indices,:,x1y1[:,0],x1y1[:,1]].to(points.device)
+    x0y0 = x0y0.to(points.device)
+    x0y1 = x0y1.to(points.device)
+    x1y0 = x1y0.to(points.device)
+    x1y1 = x1y1.to(points.device)
 
-        wa = ((points[:,0]-x0y0[:,0])*(points[:,1]-x0y0[:,1])).unsqueeze(1)
-        wb = ((points[:,0]-x0y1[:,0])*(x0y1[:,1]-points[:,1])).unsqueeze(1)
-        wc = ((x1y0[:,0]-points[:,0])*(points[:,1]-x1y0[:,1])).unsqueeze(1)
-        wd = ((x1y1[:,0]-points[:,0])*(x1y1[:,1]-points[:,1])).unsqueeze(1)
-        interp_features = wa * features_topleft + wb * features_topright + wc * features_bottomleft + wd * features_bottomright
-        return mask.unsqueeze(1)*interp_features
+    wa = ((points[:,0]-x0y0[:,0])*(points[:,1]-x0y0[:,1])).unsqueeze(1)
+    wb = ((points[:,0]-x0y1[:,0])*(x0y1[:,1]-points[:,1])).unsqueeze(1)
+    wc = ((x1y0[:,0]-points[:,0])*(points[:,1]-x1y0[:,1])).unsqueeze(1)
+    wd = ((x1y1[:,0]-points[:,0])*(x1y1[:,1]-points[:,1])).unsqueeze(1)
+    interp_features = wa * features_topleft + wb * features_topright + wc * features_bottomleft + wd * features_bottomright
+    return mask.unsqueeze(1)*interp_features
 
 def get_interpolation_indices(points,h,w):
     x0 = torch.floor(points[...,0]).long()
@@ -43,14 +43,13 @@ def get_interpolation_indices(points,h,w):
     y0 = torch.floor(points[...,1]).long()
     y1 = y0 + 1
 
-    mask = (x0 < 0) | (x0 >= w) | (y0 < 0) | (y0 >= h)
+    mask = (x0 < 0) | (x0 >= 100) | (y0 < 0) | (y0 >= 100)
 
-    
-    x0 = torch.clamp(x0, 0, w-1)
-    x1 = torch.clamp(x1, 0, w-1)
-    y0 = torch.clamp(y0, 0, h-1)
-    y1 = torch.clamp(y1, 0, h-1)
-    
+    x0 = x0*(~mask)
+    x1 = x1*(~mask)
+    y0 = y0*(~mask)
+    y1 = y1*(~mask)    
+       
     x0y0 = torch.stack((x0, y0), dim=-1).unsqueeze(2)
     x0y1 = torch.stack((x0, y1), dim=-1).unsqueeze(2)
     x1y0 = torch.stack((x1, y0), dim=-1).unsqueeze(2)

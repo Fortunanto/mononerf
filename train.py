@@ -17,7 +17,15 @@ import copy
 import torch
 import torch.autograd as autograd
 from torchviz import make_dot
-
+def check_parameters_changed(model, prev_parameters):
+    current_parameters = copy.deepcopy(model.state_dict())
+    if prev_parameters is None:
+        return True
+    else:
+        for param_name in prev_parameters.keys():
+            if not torch.equal(prev_parameters[param_name], current_parameters[param_name]):
+                return True
+        return False
 # PYZSHCOMPLETE_OK
 def check_parameters_changed(model, prev_parameters):
     current_parameters = copy.deepcopy(model.state_dict())
@@ -40,9 +48,10 @@ def train(ray_bender,video_downsampler,spatial_feature_aggregation,spatial_encod
     best_epoch_flow_loss = float('inf')  # Initialize with very high value
     checkpoint_dir = "./checkpoints"  # You may want to change this
     os.makedirs(checkpoint_dir, exist_ok=True)
-
+    prev_parameters = None
     for epoch in range(config.epochs):
         ray_bender.train()
+        prev_parameters = copy.deepcopy(ray_bender.state_dict())
 
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch+1}/{config.epochs}") as pbar:
             for batch_idx, (index,rays_o,rays_d, target) in enumerate(tqdm(train_loader)):
@@ -77,19 +86,24 @@ def train(ray_bender,video_downsampler,spatial_feature_aggregation,spatial_encod
                 trajectory_2d = rearrange(trajectory_2d,'(time b n_samples)  xy -> time b n_samples xy',b=trajectory_shape[1],n_samples=config.n_samples)
                 trajectory_2d = reduce(trajectory_2d,'time b n_samples xy -> time b xy',reduction='mean')
                 trajectory_2d = adjust_to_image_coordinates(trajectory_2d,config.image_size)
-                f_sp = spatial_encoder(spatial_feature_aggregation(trajectory_2d,config.image_size[0],config.image_size[1],image_indices))
-                f_temp = f_temp.expand(f_sp.shape[0],-1)
-                f_dy = torch.cat([f_temp,f_sp],dim=1)
-
-                assert False, f"f_temp shape {f_temp.shape} f_sp shape {f_sp.shape} f_dy shape {f_dy.shape}"
-                assert False, f"aggregated_features_trajectory.shape: {aggregated_features_trajectory.shape}"
-                flow_loss.backward()
+                feat = spatial_feature_aggregation(trajectory_2d,config.image_size[0],config.image_size[1],image_indices)
+                feat_loss = criterion(feat,torch.ones_like(feat)+1)
+                # assert False, f"check_full_differentiability(feat_loss) {check_differentiability(feat_loss)}"
+                feat_loss.backward()
+                # assert False, f"feat.grad_fn: {feat.grad_fn}"
+                # f_sp = spatial_encoder(feat)
+                # f_temp = f_temp.expand(f_sp.shape[0],-1)
+                # f_dy = torch.cat([f_temp,f_sp],dim=1)
+                
+                # assert False, f"f_temp shape {f_temp.shape} f_sp shape {f_sp.shape} f_dy shape {f_dy.shape}"
+                # assert False, f"aggregated_features_trajectory.shape: {aggregated_features_trajectory.shape}"
+                # flow_loss.backward()
                 optimizer.step()
                 # wandb.log({"flow_loss Train": flow_loss.item()})
 
                 epoch_flow_loss += flow_loss.item()
                 num_batches += 1
-                pbar.set_postfix({"Flow Loss Train": flow_loss.item()})
+                pbar.set_postfix({"Feat Loss Train": feat_loss.item()})
                 pbar.update()
 
 
@@ -107,6 +121,8 @@ def train(ray_bender,video_downsampler,spatial_feature_aggregation,spatial_encod
             # wandb.log({"epoch_flow_loss": epoch_flow_loss})
             epoch_flow_loss = 0
             num_batches = 0
+            parameters_changed = check_parameters_changed(ray_bender, prev_parameters)
+            print(f"Parameters changed: {parameters_changed}")
 
         
 

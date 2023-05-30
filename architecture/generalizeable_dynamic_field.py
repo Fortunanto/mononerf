@@ -102,7 +102,7 @@ class PointTrajectory(nn.Module):
         initial_point = rearrange(initial_point, 'batch n_samples xyz -> (batch n_samples) xyz')
         time_indices = rearrange(repeat(time_indices, 'batch  -> batch n_samples', n_samples=n_samples),'batch n_samples -> (batch n_samples)')
         self.dynamics.time_indices = time_indices
-        trajectory = torchdiffeq.odeint_adjoint(self.dynamics, initial_point, timespan,rtol=1e-3,atol=1e-3,method='dopri5')
+        trajectory = torchdiffeq.odeint_adjoint(self.dynamics, initial_point, timespan,rtol=1e-3,atol=1e-3,method='rk4')
         trajectory = rearrange(trajectory, 'time (batch n_samples) xyz -> time batch n_samples xyz',n_samples = n_samples)
         time = torch.tensor(0.0)
         velocity = self.dynamics(time, initial_point)
