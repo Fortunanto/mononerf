@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchvision.models as models
+from architecture.building_blocks import Swish, ResidualBlock
 
 class SlowfastVideoEncoder(nn.Module):
     def __init__(self,in_dim,out_dim, device="cuda", **kwargs):
@@ -27,33 +28,19 @@ class DeeplabV3Encoder(nn.Module):
 
     def forward(self, x):
         return self.deeplab(x)['out']
-    
-class ResnetImageEncoder(nn.Module):
-    def __init__(self,in_dim,out_dim, device="cuda", **kwargs):
+
+class VectorEncoder(nn.Module):
+    def __init__(self,in_dim,inner_dims,out_dim):
         super().__init__()
-        self.resnet = models.resnet18(pretrained=True).to(device=device)
-        
-        # self.resnet.avgpool = nn.Identity()
-        # self.resnet.fc = nn.Identity()
-        # assert False, f"resnet keys: {self.resnet}"
-        for param in self.resnet.parameters():
-            param.requires_grad = False
-        # self.resnet.fc = nn.Linear(512, out_dim).to(device=device)
-
+        self.network = nn.Sequential(
+            nn.Linear(in_dim, 2048),
+            Swish(),
+            ResidualBlock(2048),
+            nn.Linear(2048, 1024),
+            Swish(),
+            ResidualBlock(1024),
+            nn.Linear(1024, out_dim),
+        )
     def forward(self, x):
-        x = self.resnet.conv1(x)
-        x = self.resnet.bn1(x)
-        x = self.resnet.relu(x)
-        x = self.resnet.maxpool(x)
-
-        x = self.resnet.layer1(x)
-        x = self.resnet.layer2(x)
-        x = self.resnet.layer3(x)
-        x = self.resnet.layer4(x)
-        assert False, f"x.shape: {x.shape}"
-        x = self.avgpool(x)
-    
-        x = torch.flatten(x, 1)
-        x = self.fc(x)
+        return self.network(x)
         
-        return x    

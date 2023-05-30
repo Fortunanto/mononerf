@@ -3,40 +3,30 @@ from torch import nn, optim
 import torchdiffeq
 from util import positional_encoding
 from architecture.residual_mlp import ImplicitNet
+from architecture.building_blocks import Swish, ResidualBlock
 from einops import rearrange, repeat
 from util.utils_3d import *
 
-class SinActivation(nn.Module):
-    def forward(self, x):
-        return torch.sin(x)
-
 
 class VelocityField(nn.Module):
-    """
-    A Pytorch module that represents the velocity field in 3D space.
-
-    The VelocityField is defined as a neural network with a linear layer followed by a ReLU activation and another linear layer.
-
-    Attributes:
-        network (nn.Sequential): The sequence of layers that form the network.
-
-    Args:
-        feature_dim (int): The dimension of the input features.
-    """
-
     def __init__(self, feature_dim,time_encoding_dim):
         super(VelocityField, self).__init__()
-        self.network = nn.Sequential(*(
-            nn.Linear(feature_dim+time_encoding_dim, 32),
-            nn.Softplus(), # Custom sin activation
-            nn.Linear(32, 3),
-            nn.Softplus()
-            # nn.ReLU()
-        ))
-        # self.network = ImplicitNet(feature_dim+time_encoding_dim, [2048,2560, 256],skip_in=[2], d_out=3)
+        self.network = nn.Sequential(
+            nn.Linear(feature_dim+time_encoding_dim, 512),
+            Swish(),
+            ResidualBlock(512),
+            nn.Linear(512, 256),
+            Swish(),
+            ResidualBlock(256),
+            nn.Linear(256, 128),
+            Swish(),
+            ResidualBlock(128),
+            nn.Linear(128, 3)
+        )
+        self.features = None
         self.time_encoding_dim = time_encoding_dim
-
-    def forward(self, t, features):
+        
+    def forward(self, x):
         """
         Performs a forward pass on the network.
 
@@ -47,20 +37,26 @@ class VelocityField(nn.Module):
         Returns:
             torch.Tensor: The output velocity. Shape: (batch_size, 3).
         """
-        x = torch.cat([features, t], dim=-1)
+        x = torch.cat([x,self.features], dim=-1)
         return self.network(x)
         # except:
             # assert False, f"features.shape {features.shape} t_enc.shape {t_enc.shape}"
 
 class Dynamics(nn.Module):
-    def __init__(self, velocity_field, time_indices):
+    def __init__(self, velocity_field, time_indices,encoding_dim):
         super(Dynamics, self).__init__()
         self.velocity_field = velocity_field
         self.time_indices = time_indices
+        self.time_encoding = encoding_dim
 
     def forward(self, t, x):
         t = (self.time_indices + t).unsqueeze(1)
-        velocity = self.velocity_field(t,x)
+        t_enc = positional_encoding(t,self.time_encoding)
+        x_reshaped = rearrange(x,'a b -> (a b) 1')
+        x_enc = positional_encoding(x_reshaped,10)
+        x_enc = rearrange(x_enc,'(batch xy) pos_enc -> batch (xy pos_enc)',xy=3)
+        x = torch.cat([x_enc, t_enc], dim=-1)
+        velocity = self.velocity_field(x)
         return velocity
 
 
@@ -78,12 +74,12 @@ class PointTrajectory(nn.Module):
 
     def __init__(self,point_dim, feature_dim,time_encoding_dim = 3):
         super(PointTrajectory, self).__init__()
-        self.velocity_field = VelocityField(point_dim,1)
+        self.velocity_field = VelocityField(feature_dim+point_dim*20,time_encoding_dim*2)
         self.time_encoding_dim = time_encoding_dim
         self.time_indices = None
-        self.dynamics = Dynamics(self.velocity_field, self.time_indices)
+        self.dynamics = Dynamics(self.velocity_field, self.time_indices,time_encoding_dim)
 
-    def forward(self, initial_point, features,intrinsics,poses,time_indices,time_span=100):
+    def forward(self, initial_point,features,intrinsics,poses,time_indices,time_span=100):
         """
         Calculates the trajectory of the points over time and projects them into 2D space.
 
@@ -99,16 +95,20 @@ class PointTrajectory(nn.Module):
             torch.Tensor: The 2D projection of the trajectory. Shape: (batch_size, time_span, 2).
         """
         n_samples = initial_point.shape[1]
-        # features_encoded_expanded = repeat(features,'features -> batch n_samples features',n_samples = n_samples,batch=initial_point.shape[0])
-        timespan = torch.linspace(-1, 1, steps=time_span).to(features.device)
-        # initial_point = torch.cat([initial_point, features_encoded_expanded], dim=-1)
+        initial_shape = initial_point.shape
+        features_encoded_expanded = repeat(features,'features -> (batch n_samples) features',n_samples = n_samples,batch=initial_point.shape[0])
+        self.dynamics.velocity_field.features = features_encoded_expanded
+        timespan = torch.linspace(-1, 1, steps=time_span).to(initial_point.device)
         initial_point = rearrange(initial_point, 'batch n_samples xyz -> (batch n_samples) xyz')
         time_indices = rearrange(repeat(time_indices, 'batch  -> batch n_samples', n_samples=n_samples),'batch n_samples -> (batch n_samples)')
         self.dynamics.time_indices = time_indices
-        trajectory = torchdiffeq.odeint_adjoint(self.dynamics, initial_point, timespan,rtol=1e-3,atol=1e-3)[:, :, :3]
-        trajectory = rearrange(trajectory, 'time (batch n_samples) xyz -> batch n_samples time xyz',n_samples = n_samples)
-        # assert False, f"initial_point[:4,:3] {initial_point[:4,:3]} velocities[:4] {velocities[:4,0]}"
-        return trajectory
+        trajectory = torchdiffeq.odeint_adjoint(self.dynamics, initial_point, timespan,rtol=1e-3,atol=1e-3,method='dopri5')
+        trajectory = rearrange(trajectory, 'time (batch n_samples) xyz -> time batch n_samples xyz',n_samples = n_samples)
+        time = torch.tensor(0.0)
+        velocity = self.dynamics(time, initial_point)
+        velocity = rearrange(velocity, '(batch n_samples) xyz -> batch n_samples xyz',n_samples = n_samples)
+
+        return trajectory,velocity
 
 
 if __name__ == '__main__':

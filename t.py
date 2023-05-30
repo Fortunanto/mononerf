@@ -1,22 +1,17 @@
-from utils.utils_3d import *
-from einops import *
+import torch
 
-intrinsics = torch.load("data/ball/data/intrinsics.pt")
-poses = torch.load("data/ball/data/pose.pt")
-pose = poses[0]
-# assert False, f"poses.shape: {poses.shape} intrinsics.shape: {intrinsics.shape}" 
-intrinsic = intrinsics[0]
-intrinsic=  repeat(intrinsic, "a b -> n a b ", n=151)
-pose =  repeat(pose, "a b -> n a b ", n=151)
-print(intrinsic.shape, pose.shape)
+# Let's assume idx is your tensor of indices
+idx = torch.tensor([1, 2, 1, 3, 2, 3, 1])
 
+unique_elements = torch.unique(idx, return_counts=True)
 
-# assert False, f"intrinsic {intrinsic}"
-points = torch.randn(151,3,3).to(device="cuda")
-points_2d = project_3d_to_2d_batch(points, intrinsics, poses)
-assert False , f"points_2d.shape: {points_2d.shape}"
+result = []
+for element in unique_elements[0]:
+    element_indices = torch.where(idx == element)[0]
+    result.append(element_indices)
 
-# assert False, f"pose.shape: {pose.shape} intrinsic {intrinsic.shape}"
-# assert False, f"pose.shape: {pose.shape} intrinsics {intrinsics.shape}"
-# print(project_3d_to_2d(np.array([-1,1,0]), intrinsic, pose))
-# print(world_mat)\
+# Padding with -1s for tensors with fewer indices
+max_len = max([t.size(0) for t in result])
+result_padded = torch.stack([torch.cat((t, torch.full((max_len - t.size(0),), -1, dtype=torch.long))) for t in result])
+
+print(result_padded[0])

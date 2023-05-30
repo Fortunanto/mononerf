@@ -10,7 +10,7 @@
     "linear_displacement":true,
     "time_span":3,
     "epochs": 100000,
-    "lr": 1e-3,
+    "lr": 5e-6,
     "experiment_name": "ball",
     "exp_group_name": "mononerf",
     "n_samples":4

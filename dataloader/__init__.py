@@ -151,15 +151,16 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
         self.images = F.interpolate(self.images,size=(240,360))
         self.image_encodings = torch.load(os.path.join(self.data_dir, "image_encoding.pt"))
         self.video_embeddings = torch.load(os.path.join(self.data_dir, "video_embedding.pt"))
-        self.video_flow = torch.zeros((150,2,240,360)).to(device=self.device)
-        h,w=240,360
+        self.video_flow = torch.load(os.path.join(self.data_dir, "flows.pt"))
+        self.video_flow = F.interpolate(self.video_flow,size=(240,360))
+
+        h,w=100,100
         self.n_images = self.images.shape[0]
         self.intrinsics,self.poses = torch.load(os.path.join(self.data_dir, "intrinsics.pt")),torch.load(os.path.join(self.data_dir, "pose.pt"))
-        self.intrinsics.requires_grad = False
-        self.poses.requires_grad = False
+        self.rays_o_np = np.load(os.path.join(self.data_dir, "rays_o.npy"))
+        self.rays_d_np = np.load(os.path.join(self.data_dir, "rays_d.npy"))
         # self.indices = list(itertools.product(range(1,self.n_images-1),range(h),range(w)))
-        self.indices = list(itertools.product(range(1,3),range(2),range(2)))
-
+        self.indices = list(itertools.product(range(1,4),range(40),range(40)))
 
         object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
         object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
@@ -169,8 +170,8 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
     def get_pose_intrinsics(self, image_indices):
         return self.poses[image_indices],self.intrinsics[image_indices]
     
-    def get_image_features(self, image_indices,x,y):
-        return self.image_encodings[image_indices,:,x,y]
+    def get_image_encodings(self, image_indices,x,y):
+        return self.image_encodings
     def get_video_embedding(self):
         return self.video_embeddings
     def get_video_flows(self):
@@ -180,7 +181,11 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
     
     def __getitem__(self, index):
         # assert False, f"index {index} {self.indices[index]}"
-        return self.indices[index],self.images[self.indices[index][0],:,self.indices[index][1],self.indices[index][2]]
+        image_index,x,y = self.indices[index]
+
+        rays_o = self.rays_o_np[image_index,x,y]
+        rays_d = self.rays_d_np[image_index,x,y]
+        return self.indices[index],rays_o,rays_d,self.images[self.indices[index][0],:,self.indices[index][1],self.indices[index][2]]
 
         
 
