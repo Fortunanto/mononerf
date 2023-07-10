@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+
 class SinActivation(nn.Module):
     def forward(self, x):
         return torch.sin(x)
@@ -15,7 +16,11 @@ class ResidualBlock(nn.Module):
             nn.Linear(dim, dim),
             Swish(),
             nn.Linear(dim, dim),
+
         )
 
     def forward(self, input_tensor):
-        return input_tensor + self.block(input_tensor)
+        shape = input_tensor.shape
+        input_tensor = input_tensor.reshape(-1,shape[-1])
+        out = input_tensor + self.block(input_tensor)
+        return out.reshape(*shape)

@@ -9,7 +9,20 @@ class DictToClass:
                 setattr(self, key, DictToClass(value))
             else:
                 setattr(self, key, value)
-                
+    def to_dict(self):
+        dictionary = {}
+        for key, value in self.__dict__.items():
+            if isinstance(value, DictToClass):
+                dictionary[key] = value.to_dict()
+            else:
+                dictionary[key] = value
+        return dictionary
+    def set_run_name(self, run_name):
+        if not hasattr(self, 'run_name'):
+            self.run_name = run_name
+        else:
+            print("Run name already set, is {}.".format(self.run_name))
+
 def parse_config(config_path):
     with open(config_path) as config_file:
         config = json.load(config_file)
@@ -18,7 +31,7 @@ def parse_config(config_path):
 def get_config():
     parser = argparse.ArgumentParser(description='Config Parser')
     parser.add_argument('--config', '-c', help='Path to the config JSON file')
-    parser.add_argument('--data_folder', '-d', help='Data folder path')
+    parser.add_argument('--data_folders', '-d', help='Data folder path')
     parser.add_argument('--image_size', '-i', nargs=2, type=int, help='Image size (width height)')
     parser.add_argument('--checkpoint', '-ckpt', help='Checkpoint path')
     parser.add_argument('--batch_size', '-b', type=int, help='Batch size')
@@ -35,8 +48,8 @@ def get_config():
     else:
         config = {}
 
-    if args.data_folder:
-        config['data_folder'] = args.data_folder
+    if args.data_folders:
+        config['data_folders'] = args.data_folders
 
     if args.image_size:
         config['image_size'] = args.image_size
@@ -54,9 +67,9 @@ def get_config():
 
     assert config, "No configurations provided."
 
-    required_keys = ['data_folder', 'image_size', 'checkpoint', 'batch_size',  'epochs', 'lr',  'exp_group_name']
-    missing_keys = [key for key in required_keys if key not in config]
+    # required_keys = ['data_folders', 'image_size', 'checkpoint', 'batch_size',  'epochs', 'lr',  'exp_group_name']
+    # missing_keys = [key for key in required_keys if key not in config]
 
-    assert not missing_keys, f"Missing configuration keys: {', '.join(missing_keys)}"
+    # assert not missing_keys, f"Missing configuration keys: {', '.join(missing_keys)}"
     return DictToClass(config)
     

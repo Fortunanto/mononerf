@@ -528,7 +528,6 @@ def rot_to_quat(R):
     q[:, 3] = (R10 - R01) / (4 * q[:, 0])
     return q
 
-
 def get_module(net):
     """
     Shorthand for either net.module (if net is instance of DataParallel) or net
@@ -537,3 +536,4 @@ def get_module(net):
         return net.module
     else:
         return net
+

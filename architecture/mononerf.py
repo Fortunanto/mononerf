@@ -1,55 +1,99 @@
-from architecture.encoders import *
-from architecture.residual_mlp import *
-from architecture.generalizeable_dynamic_field import *
-from dataloader import *
-import torch
 import torch.nn as nn
-import time
-# Path: train.py
+import torch
+import torch.nn.functional as F
 
-class MonoNeRF(nn.Module):
-    def __init__(self,slowfast_encoded_video) -> None:
-        super().__init__()
-        self.video_base_encoding = slowfast_encoded_video
-        in_feature_dim = slowfast_encoded_video.shape[0]
-        feature_dim = 2048
-        self.video_encoder = ImplicitNet(in_feature_dim, [2048, 512, 256, 256], d_out=feature_dim).to(device="cuda")
-        # self.implicit_net = ImplicitNet(2048, [512, 256, 256], d_out=256).to(device="cuda")
-        self.ray_bending_estimator = PointTrajectory(3,feature_dim)
+# Model
+output_dim = {True:5, False:5}
+class NeRF(nn.Module):
+    def __init__(self, D=8, W=512, input_ch=3, input_ch_views=3,  skips=[2,3],dynamic=True, use_viewdirs=False):
+        """ 
+        """
+        super(NeRF, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+        # self.dynamic = dynamic
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
+        self.pts_norms = nn.ModuleList([nn.BatchNorm1d(input_ch)]+[nn.BatchNorm1d(W) for _ in range(D)])
 
-        self.images = torch.Tensor(load_images_as_tensor("data/ball/image"))
+        ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
+
+        ### Implementation according to the paper
+        # self.views_linears = nn.ModuleList(
+        #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
         
-    def forward(self, index):
+        if use_viewdirs:
+            self.feature_linear = nn.Linear(W, W)
+            self.alpha_linear = nn.Linear(W, 1)
+            self.rgb_linear = nn.Linear(W//2, 3)
+        else:
+            self.output_linear = nn.Linear(W, output_dim[dynamic])
+
+    def forward(self, input_pts):
+        shape = input_pts.shape
+        input_pts = input_pts.reshape(-1, self.input_ch)
+        h = input_pts
+        # h = self.pts_norms[0](h)
+        for i, l in enumerate(self.pts_linears):
+            h = l(h)
+            # h = self.pts_norms[i+1](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+        # if self.use_viewdirs:
+        #     alpha = self.z alpha_linear(h)
+        #     feature = self.feature_linear(h)
+        #     h = torch.cat([feature, input_views], -1)
         
-        downsampled_encoded_video = self.video_encoder(self.video_base_encoding)
-        self.ray_bending_estimator(x,downsampled_encoded_video,)
+        #     for i, l in enumerate(self.views_linears):
+        #         h = self.views_linears[i](h)
+        #         h = F.relu(h)
 
-            def forward(self, initial_point, features,intrinsics,poses,time_span=100):
+        #     rgb = self.rgb_linear(h)
+        #     outputs = torch.cat([rgb, alpha], -1)
+        # else:
+        outputs = self.output_linear(h)
+        # outputs[...,4] = 
 
-        # assert False, f"downsampled_encoded_video.shape: {downsampled_encoded_video.shape}"
-        pass
-
-def train(model, train_loader, optimizer, criterion, device):
-    pass
-
-
-def wait_and_print(seconds):
-    for i in range(1, seconds+1):
-        print(f"{i} second passed")
-        time.sleep(1)
+        # rgb_sigma,weights = torch.split(outputs, [4,1], dim=-1)
+        # weights = torch.sigmoid(weights)
+        # outputs = torch.cat([rgb_sigma,weights], -1)
+        # assert False, f"rgb: {rgb.shape}, sigma: {sigma.shape}, weights: {weights.shape}"
+        return outputs.reshape(*shape[:-1], -1)    
 
 
-def main():
-    encoded_video = torch.load("data/ball/data/video_embedding.pt").to(device="cuda")
-    model = MonoNeRF(encoded_video).to(device="cuda")
-    # wait_time = 10
-    # wait_and_print(wait_time)
-    start_time = time.time()
-    model(None)
-    end_time = time.time()    
-    execution_time = end_time - start_time
-    print(f"The function took {execution_time} seconds to execute.")
-    assert False, f"encoded_video.shape: {encoded_video.shape} execution_time {execution_time}"
+    def load_weights_from_keras(self, weights):
+        assert self.use_viewdirs, "Not implemented if use_viewdirs=False"
+        
+        # Load pts_linears
+        for i in range(self.D):
+            idx_pts_linears = 2 * i
+            self.pts_linears[i].weight.data = torch.from_numpy(np.transpose(weights[idx_pts_linears]))    
+            self.pts_linears[i].bias.data = torch.from_numpy(np.transpose(weights[idx_pts_linears+1]))
+        
+        # Load feature_linear
+        idx_feature_linear = 2 * self.D
+        self.feature_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_feature_linear]))
+        self.feature_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_feature_linear+1]))
 
-if __name__ == '__main__':
-    main()
+        # Load views_linears
+        idx_views_linears = 2 * self.D + 2
+        self.views_linears[0].weight.data = torch.from_numpy(np.transpose(weights[idx_views_linears]))
+        self.views_linears[0].bias.data = torch.from_numpy(np.transpose(weights[idx_views_linears+1]))
+
+        # Load rgb_linear
+        idx_rbg_linear = 2 * self.D + 4
+        self.rgb_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear]))
+        self.rgb_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_rbg_linear+1]))
+
+        # Load alpha_linear
+        idx_alpha_linear = 2 * self.D + 6
+        self.alpha_linear.weight.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear]))
+        self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
+
+

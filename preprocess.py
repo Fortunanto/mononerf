@@ -10,7 +10,7 @@ import shutil
 import os
 from torchvision import transforms
 import torch.nn.functional as F
-
+from architecture.encoder import ImageEncoder
 # Path: train.py
 
 def train(model, train_loader, optimizer, criterion, device):
@@ -23,18 +23,21 @@ def main( data_path, output_dir, extract_video_embeddings):
     if extract_video_embeddings:
         model = SlowfastVideoEncoder(in_dim=10, out_dim=10).to(device=device).eval()
     else:
-        model = DeeplabV3Encoder(in_dim=10, out_dim=10).to(device=device).eval()
+        model = ImageEncoder().to(device=device).eval()
 
-    for dir in tqdm(["ball"]):
+    for dir in tqdm(["data/Balloon1", "data/Balloon2","data/Umbrella","data/Truck","data/Skating","data/Playground","data/Jumping"]):
         with torch.no_grad():
-            path = os.path.join(data_path, dir, "image")
+            path = os.path.join(dir, "images")
             images = torch.Tensor(load_images_as_tensor(path)).to(device=device)
+            # assert False, f"images shape {images.shape}"
             if extract_video_embeddings:
                 # Prepare images for video embeddings
                 slowfast_data = prepare_for_slowfast(images, [0.45, 0.45, 0.45], [0.225, 0.225, 0.225]
                                                      , 400,
                                                      device=device)
+                assert False, f"slowfast_data[0].shape: {slowfast_data[0].shape} slowfast_data[1].shape: {slowfast_data[1].shape}"
                 output = model(slowfast_data)
+                assert False, f"output.shape: {output.shape}"
                 file_name = "video_embedding.pt"
                 path_processed = os.path.join(data_path, dir, output_dir)
                 path_output = os.path.join(path_processed, file_name)
@@ -43,19 +46,19 @@ def main( data_path, output_dir, extract_video_embeddings):
 
             else:
                 images=images.permute(1, 0, 2, 3)
-                file_name = "image_embedding.pt"
+                file_name = "image_embeddings_static.pt"
                 preprocess = transforms.Compose([
                     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ])
                 # assert False, f"images.shape: {images.shape}"
                 output = []
                 for i,batch in enumerate(range(0,images.shape[0],16)):
-                    images_output = F.interpolate(preprocess(images[batch:batch+16,...]),size=(240,360),mode="bilinear")
+                    images_output =preprocess(images[batch:batch+16,...])
                     # assert False, f"images_output.shape: {images_output.shape}"
                     output = model(images_output)
                     print("output.shape",output.shape)
-                    torch.save(output, os.path.join(data_path, dir, output_dir, f"image_embedding_{batch}_{batch+15}.pt"))
-                    
+                    os.makedirs(os.path.join(dir),exist_ok=True)
+                    torch.save(output, os.path.join(dir,'embeddings', f"image_embeddings_static.pt"))
                 
                 # assert False, f"images.shape: {images.shape}"
                 
