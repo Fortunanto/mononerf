@@ -167,16 +167,15 @@ def project_3d_to_2d_batch(points_3d, intrinsic_matrix, pose_matrix):
     # Swap coordinates to match (row, column) format and return
     return torch.stack([points_2d[:, 1], points_2d[:, 0]], dim=-1)
 
-def compute_2d_displacements(points_start,points_end, intrinsic_matrices,pose_matrices, time_step=1):
-    # Project 3D points to 2D
-    points_2d = project_3d_to_2d(points_start,pose_matrices, intrinsic_matrices)
-    next_points_2d = project_3d_to_2d(points_end, pose_matrices,intrinsic_matrices)
-    # assert not points_3d.isnan().any(), f"Points_3d has NaN values: {points_3d}"
-    # assert not points_2d.isnan().any(), f"Points_2d has NaN values: {points_2d}"
-    # assert not next_points_2d.isnan().any(), f"Next_points_2d has NaN values: {next_points_2d}"
-    # Compute 2D displacements
-    displacements_2d = next_points_2d - points_2d
-    return displacements_2d
+# def compute_2d_displacements(points_start,points_end, intrinsic_matrices,pose_matrices, time_step=1):
+#     # Project 3D points to 2D
+#     points_2d = project_3d_to_2d(points_start,pose_matrices, intrinsic_matrices)
+#     next_points_2d = project_3d_to_2d(points_end, pose_matrices,intrinsic_matrices)
+#     # assert not points_3d.isnan().any(), f"Points_3d has NaN values: {points_3d}"
+#     # assert not points_2d.isnan().any(), f"Points_2d has NaN values: {points_2d}"
+#     # assert not next_points_2d.isnan().any(), f"Next_points_2d has NaN values: {next_points_2d}"
+#     # Compute 2D displacements
+#     return displacements_2d
 
 if __name__ == "__main__":
     point = torch.randint(200,400,size=(10,2)).to(device="cuda")

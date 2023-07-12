@@ -17,7 +17,7 @@ from pytorchvideo.transforms import (
 from tqdm import tqdm
 import torch.nn.functional as F
 import cv2 as cv
-from util.ray_helpers import get_rays_np,ndc_rays_np,get_rays
+from util.ray_helpers import get_rays_np,ndc_rays_np,get_rays,ndc_rays
 slowfast_alpha = 4
 create_compose = lambda mean, std, crop_size,side_size: Compose( [
             Lambda(lambda x: x/255.0),
@@ -265,9 +265,6 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
             mean = self.image_encodings.min(dim=-1,keepdim=True)[0].min(dim=-2,keepdim=True)[0].min(dim=1,keepdim=True)[0]
             std = self.image_encodings.max(dim=-1,keepdim=True)[0].max(dim=-2,keepdim=True)[0].max(dim=1,keepdim=True)[0]
             self.image_encodings = (self.image_encodings - mean) / std
-
-            self.image_encodings_static = [torch.load(os.path.join(dir, "image_embeddings_static.pt")) for dir in self.embedding_dirs]
-            self.image_encodings_static = torch.stack(self.image_encodings_static)           # minimum = self.image_encodings.min(dim=-1,keepdim=True)[0].min(dim=-2,keepdim=True)[0].min(dim=1,keepdim=True)[0]
             self.h,self.w=self.images.shape[-2],self.images.shape[-1]
             self.n_images = self.images.shape[1]
             self.n_scenes = self.images.shape[0]
@@ -320,6 +317,9 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
                 intrinsic = self.intrinsics[scene][image].cpu().detach().numpy()
                 pose = self.poses[scene][image].cpu().detach().numpy()
                 rays_o,rays_d = get_rays_np(self.h, self.w, intrinsic, pose)
+                if config.forward_facing:
+                    rays_o, rays_d = ndc_rays_np(self.h, self.w,
+                        intrinsic[0,0], 1., rays_o, rays_d)
                 rays_o = rays_o.transpose(2,0,1)
                 rays_d = rays_d.transpose(2,0,1)
                 images_ray_o.append(rays_o)
@@ -357,7 +357,7 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
         rays_o = self.rays_o_np[scene_index,image_index,:,y,x]
         rays_d = self.rays_d_np[scene_index,image_index,:,y,x]
         image_indices = torch.tensor(np.clip([image_index-1,image_index,image_index+1],0,self.n_images-1))
-        ind = (torch.tensor([scene_index,scene_index,scene_index]),image_indices,x,y)
+        ind = (scene_index,image_indices,x,y)
         pose = self.poses[scene_index,image_indices]
         intrinsic = self.intrinsics[scene_index,image_indices]
         image_mask = self.images_masks[scene_index,image_index,y,x]

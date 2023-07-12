@@ -135,14 +135,17 @@ def near_far_from_sphere(rays_o, rays_d):
     far = mid + 1.0
     return near, far
 
-def project_3d_to_image_coords(h,w, pose, intrinsics, trajectory,):
-    trajectory_world = NDC2world(trajectory,h,w, intrinsics[...,0,0].unsqueeze(-1))
+def project_3d_to_image_coords(h,w, pose, intrinsics, trajectory,forward_facing_scene = True):
+    if forward_facing_scene:
+        trajectory_world = NDC2world(trajectory,h,w, intrinsics[...,0,0].unsqueeze(-1))
+    else:
+        trajectory_world = trajectory
     trajectory_2d = project_3d_to_2d(trajectory_world, pose,intrinsics)
     trajectory_2d = rearrange(trajectory_2d, '(b time n_samples) xy -> b time n_samples xy',
                            b=trajectory.shape[0], n_samples=trajectory.shape[2])
     return trajectory_2d
 
-def get_points_along_rays(rays_o,rays_d,near,far,lindisp,perturb,N_samples = 1024):
+def get_points_along_rays(rays_o,rays_d,near,far,lindisp,perturb,N_samples = 1024,**kwargs):
     N_rays = rays_d.shape[0]
     t_vals = torch.linspace(0., 1., steps=N_samples).to(rays_d.device)
     if not lindisp:

@@ -5,7 +5,7 @@ from tqdm import tqdm
 from util.ray_helpers import get_points_along_rays,project_3d_to_image_coords
 from util import positional_encoding
 import torch.nn.functional as F
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=1, white_bkgd=False, pytest=False):
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=1, white_bkgd=False, pytest=False,**kwargs):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -150,54 +150,87 @@ def raw2outputs_dynamic(raw_s,
            rgb_map_d, depth_map_d, acc_map_d, weights_d, dynamicness_map
 
 
+def batchify_rays(train_loader, s, t, models, video_embedding, config, chunk=1024, verbose=True,device="cuda", **kwargs):
+    rays_o_render, rays_d_render = train_loader.dataset.rays_o_np[s,t],train_loader.dataset.rays_d_np[s,t]
+    rays_o_render = rays_o_render.transpose(1,2,0)
+    rays_d_render = rays_d_render.transpose(1,2,0)
 
-def batchify_rays(rays_o,rays_d,networks,dataset,chunk=1024,output_dir="",t=3,verbose=False):
-    rays_o_flat = rearrange(rays_o,'h w c -> (h w) c')
-    assert t>0 and t<dataset.bds.shape[1], f"t must be between 0 and {dataset.bds.shape[1]}"
-    rays_d_flat = rearrange(rays_d,'h w c -> (h w) c')
+    poses_render = train_loader.dataset.poses[s,[t-1,t,t+1]].to(device)
+    intrinsics_render = train_loader.dataset.intrinsics[s,[t-1,t,t+1]].to(device)
+    
+    rays_o_flat = rearrange(rays_o_render,'h w c -> (h w) c')
+    rays_d_flat = rearrange(rays_d_render,'h w c -> (h w) c')
     rays_o_flat = torch.from_numpy(rays_o_flat).to(device="cuda")
     rays_d_flat = torch.from_numpy(rays_d_flat).to(device="cuda")
     
-    img = torch.zeros(*rays_o_flat.shape).to(device="cuda")
+    result = {}
+    result["rgb_full"] = torch.zeros(*rays_o_flat.shape).to(device="cuda")
+    
     with torch.no_grad():
-        video_embedding = dataset.get_video_embedding().to("cuda").float()
-        f_temp = networks['video_downsampler'](video_embedding)
-        for i in tqdm(range(0, img.shape[0], chunk),disable=not verbose):
-            # f_st = spatial_encoder(image_enc_flat[:,i:i+chunk])
-            rays_d_cur = rays_d_flat[i:i+chunk]
-            rays_o_cur = rays_o_flat[i:i+chunk]
-            size = rays_d_cur.shape[0]
-            image_indices = torch.tensor(t).unsqueeze(0).expand(size).to("cuda")
-            scene_indices = torch.tensor(0).unsqueeze(0).expand(size).to("cuda")
-            image_indices_threes = torch.cat([(image_indices-1).unsqueeze(0),image_indices.unsqueeze(0),(image_indices+1).unsqueeze(0)],dim=0)
-            near, far = 0 * torch.ones_like(rays_d_cur[:,:1]), 1 * torch.ones_like(rays_d_cur[:,:1])
-            points, z_vals = get_points_along_rays(
-                rays_o_cur, rays_d_cur, near, far, False, 0.5, 64)
-            trajectory = networks['ray_bender'](
-                points, f_temp, image_indices, scene_indices, 3)
-            pose = dataset.poses[0,t-1:t+2]
-            intrinsics = dataset.intrinsics[0,t-1:t+2]
-            pose = pose.unsqueeze(1).unsqueeze(1).expand(-1,size, 64, -1, -1)
-            intrinsics = intrinsics.unsqueeze(1).unsqueeze(1).expand(-1,size, 64, -1, -1)
-            trajectory_2d = project_3d_to_image_coords(
-                270,480, pose, intrinsics, trajectory.float())
+        f_temp = models['video_downsampler'](video_embedding)
+        for i in tqdm(range(0, result["rgb_full"].shape[0], chunk),disable=not verbose):
+            size = min(chunk,result["rgb_full"].shape[0]-i)
+            pose_batch = poses_render.unsqueeze(0).expand(size,-1,-1,-1)
+            intrinsics_batch = intrinsics_render.unsqueeze(0).expand(size,-1,-1,-1)
+            scene_indices = (torch.ones(size,dtype=torch.int64)*s).to(device="cuda")
+            image_indices = (torch.ones(size,dtype=torch.int64)*t).unsqueeze(-1).to(device="cuda")
+            image_indices = torch.cat([image_indices-1,image_indices,image_indices+1],dim=-1)
+            
+            res=render_rays(rays_o_flat[i:i+chunk],
+                                rays_d_flat[i:i+chunk],
+                                models,f_temp,pose_batch,intrinsics_batch,
+                                image_indices=image_indices,scene_indices=scene_indices,config=config,
+                                all_parts=False,
+                                raw_noise_std=0,white_bkgd=True,
+                                **kwargs)["rgb_full"]
+            result["rgb_full"][i:i+chunk]=res
+    return result
 
-            points_pos_enc = positional_encoding(
-                points.unsqueeze(-1)).reshape(points.shape[0], points.shape[1], -1)
-            f_sp, *_ = networks['spatial_feature_aggregation'](
-                    trajectory_2d, 270, 480, (scene_indices.unsqueeze(0).expand(3,*scene_indices.shape),image_indices_threes))
-            f_temp_cur = f_temp[scene_indices].unsqueeze(1).expand(-1,f_sp.shape[1],-1)
-            f_sp = torch.zeros_like(f_sp)
-            f_dy = torch.cat([f_temp_cur, f_sp], dim=-1)
-            time = positional_encoding(image_indices.unsqueeze(-1),num_encodings = 5).unsqueeze(1).expand(-1,points_pos_enc.shape[1],-1)
-            time = torch.zeros_like(time)
-            points_encoded = torch.cat([points_pos_enc, f_dy,time], dim=-1)
-            outputs = networks['nerf'](points_encoded)
-            rgb, *_ = raw2outputs(outputs, z_vals.float(), rays_d_cur.float(),raw_noise_std=0,white_bkgd=True)
-            img[i:i+chunk] = rgb
-            # get_points_along_rays(rays_o_flat[i:i+chunk],rays_d_flat[i:i+chunk],,)
-    from PIL import Image
-    img = rearrange(img,'(h w) c -> h w c',h=270,w=480).cpu().numpy()
-    img = (img*255).astype(np.uint8)
-    im = Image.fromarray(img)
-    return im
+
+def render_rays(rays_o,rays_d,networks,f_temp,pose,intrinsics,image_indices,scene_indices,config,all_parts=False,**kwargs):
+    result = {}
+    h,w = config.image_size[0]//config.downscale,config.image_size[1]//config.downscale
+    near, far = 0 * torch.ones_like(rays_d[:,:1]), 1 * torch.ones_like(rays_d[:,:1])
+    points, z_vals = get_points_along_rays(
+        rays_o, rays_d, near, far, False, **kwargs)
+    trajectory = networks['ray_bending_estimator'](
+        points, f_temp, image_indices[:,1], scene_indices, 3)
+    pose_batch = pose.unsqueeze(2).expand(-1,-1, 64, -1, -1)
+    intrinsics_batch = intrinsics.unsqueeze(2).expand(-1,-1, 64, -1, -1)
+    trajectory_2d = project_3d_to_image_coords(
+        h,w, pose_batch, intrinsics_batch, trajectory.float()) 
+    result["trajectory_2d"] = trajectory_2d
+    points_pos_enc = positional_encoding(
+        points.unsqueeze(-1)).reshape(points.shape[0], points.shape[1], -1)
+    f_sp, f_sp_pre,f_sp_cur,f_sp_post = networks['spatial_feature_aggregation'](
+            trajectory_2d, h, w, (scene_indices.unsqueeze(0).expand(3,*scene_indices.shape),image_indices)) 
+    f_temp_cur = f_temp[scene_indices].unsqueeze(1).expand(-1,f_sp.shape[1],-1)
+    f_dy = torch.cat([f_temp_cur, f_sp], dim=-1)
+    time = positional_encoding(image_indices[:,1].unsqueeze(-1),num_encodings = 5).unsqueeze(1).expand(-1,points_pos_enc.shape[1],-1)
+    points_encoded = torch.cat([points_pos_enc, f_dy,time], dim=-1)
+    outputs = networks['nerf'](points_encoded)
+    result['rgb_full'], result['depth_map_full'],\
+        result["weights_full"],result["blending_full"],\
+        result["displacement_map_full"],result["accuracy_map_full"] = raw2outputs(outputs, z_vals.float(), rays_d.float(),**kwargs)
+    result['output_full'] = outputs
+    result['z_vals'] = z_vals
+    if all_parts:
+        f_dy_pre, f_dy_cur, f_dy_post = torch.cat([f_temp_cur,f_sp_pre],dim=-1), torch.cat([f_temp_cur,f_sp_cur],dim=-1), torch.cat([f_temp_cur,f_sp_post],dim=-1)
+        points_encoded_pre, points_encoded_cur, points_encoded_post = torch.cat([points_pos_enc, f_dy_pre,time], dim=-1), torch.cat([points_pos_enc, f_dy_cur,time], dim=-1), torch.cat([points_pos_enc, f_dy_post,time], dim=-1)
+        outputs_pre, outputs_cur, outputs_post = networks['nerf'](points_encoded_pre),\
+                                                    networks['nerf'](points_encoded_cur),\
+                                                        networks['nerf'](points_encoded_post)
+        result['output_pre'] = outputs_pre
+        result['output_cur'] = outputs_cur
+        result['output_post'] = outputs_post        
+        result['rgb_pre'], result['depth_map_pre'],\
+        result["weights_pre"],result["blending_pre"],\
+        result["displacement_map_pre"],result["accuracy_map_pre"] = raw2outputs(outputs_pre, z_vals.float(), rays_d.float(),**kwargs)
+        result['rgb_cur'], result['depth_map_cur'],\
+        result["weights_cur"],result["blending_cur"],\
+        result["displacement_map_cur"],result["accuracy_map_cur"] = raw2outputs(outputs_cur, z_vals.float(), rays_d.float(),**kwargs)
+        result['rgb_post'], result['depth_map_post'],\
+        result["weights_post"],result["blending_post"],\
+        result["displacement_map_post"],result["accuracy_map_post"] = raw2outputs(outputs_post, z_vals.float(), rays_d.float(),**kwargs)
+        
+    return result

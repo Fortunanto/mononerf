@@ -22,7 +22,7 @@ from torchviz import make_dot
 from util import positional_encoding, entropy, L2_norm, normalize, L1_norm, mse2psnr
 from architecture.mononerf import *
 from torch.profiler import profile, record_function, ProfilerActivity
-from util.render_utils import raw2outputs
+from util.render_utils import raw2outputs,batchify_rays,render_rays
 
 def check_parameters_changed(model, prev_parameters):
     current_parameters = copy.deepcopy(model.state_dict())
@@ -33,44 +33,6 @@ def check_parameters_changed(model, prev_parameters):
             if not torch.equal(prev_parameters[param_name], current_parameters[param_name]):
                 return True
         return False
-
-
-def batchify_rays(rays_o, rays_d, pose, intrinsics, nerf, config, chunk=1024 * 32, **kwargs):
-    with torch.no_grad():
-        rays_o_flat = rearrange(rays_o, 'h w c -> (h w) c')
-        rays_d_flat = rearrange(rays_d, 'h w c -> (h w) c')
-        img = torch.zeros(rays_o_flat.shape[0], 3).to(
-            device="cuda", dtype=torch.float32)
-        # assert False, f"rays_o_flat shape: {rays_o_flat.shape} rays_d_flat shape: {rays_d_flat.shape}"
-        for i in tqdm(range(0, rays_o_flat.shape[0], chunk)):
-            rays_o_chunk = torch.from_numpy(
-                rays_o_flat[i:i+chunk]).to(device="cuda", dtype=torch.float32)
-            rays_d_chunk = torch.from_numpy(
-                rays_d_flat[i:i+chunk]).to(device="cuda", dtype=torch.float32)
-            near, far = near_far_from_sphere(rays_o_chunk, rays_d_chunk)
-
-            points, z_vals = get_points_along_rays(
-                rays_o_chunk, rays_d_chunk, near, far, config.linear_displacement, 0, config.architecture.n_samples_nerf)
-            points_encoded = positional_encoding(
-                points.unsqueeze(-1)).reshape(points.shape[0], points.shape[1], -1)
-            outputs = nerf(points_encoded)
-
-            rgb, disp, acc, weights, depth = raw2outputs(
-                outputs, z_vals, rays_d_chunk, white_bkgd=True)
-            img[i:i+chunk] = rgb
-            # assert False, f"rgb shape: {rgb.shape} "
-
-            # assert False, f"points shape: {points.shape} z_vals shape: {z_vals.shape}"
-        img = img.reshape(rays_o.shape[0], rays_o.shape[1], 3)
-        # assert False, f"img {img}"
-        img = img.cpu().detach().numpy()*255
-        img = img.astype(np.uint8)
-        bgr_image = img[:, :, ::-1]
-
-        import cv2
-        # rays_flat = torch.cat([rays_o_flat, rays_d_flat], -1)
-        cv2.imwrite("filename.png", bgr_image)
-    # for i in range(0, rays_o.shape[0]*rays_o.shape[1], chunk):
 
 
 # PYZSHCOMPLETE_OK
@@ -111,12 +73,143 @@ def compute_mask_flow_loss(blending_pre, blending_cur, blending_post):
     blending_pre, blending_cur, blending_post = torch.sigmoid(blending_pre), torch.sigmoid(blending_cur), torch.sigmoid(blending_post)
     return L2_norm(blending_pre - blending_cur) + L2_norm(blending_cur - blending_post) + L2_norm(blending_pre - blending_post)
 
+def calculate_losses(res, target, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, disparity, pose, intrinsics, rays_d, criterion, config):
+    fwd_flow_loss = supervise_flows(res["trajectory_2d"][:,1],res["trajectory_2d"][:,2],res["output_full"][...,3],fwd_flow,fwd_flow_mask,pose[:,2],intrinsics[:,2],res["z_vals"],rays_d,criterion)
+    bwd_flow_loss = supervise_flows(res["trajectory_2d"][:,1],res["trajectory_2d"][:,0],res["output_full"][...,3],bwd_flow,bwd_flow_mask,pose[:,0],intrinsics[:,0],res["z_vals"],rays_d,criterion)
+                            
+    l_bw, l_curr, l_fw = criterion(res['rgb_pre'], target), criterion(res['rgb_cur'], target), criterion(res['rgb_post'], target)
+    L_corr = (l_curr + l_bw + l_fw)/3
+    rgb_loss = criterion(res['rgb_full'], target)
+    
+    rgb_loss_psnr = mse2psnr(rgb_loss)
+    rgb_loss_corr_psnr = mse2psnr(L_corr)
+    rgb_pre_psnr, rgb_cur_psnr, rgb_post_psnr = mse2psnr(l_bw), mse2psnr(l_curr), mse2psnr(l_fw)
+    
+    disparity_loss = compute_depth_loss(
+        res['depth_map_full'], -disparity)
+    sparse_loss = entropy(res['weights_full']) 
+    slow_loss = L1_norm(fwd_flow) + L1_norm(bwd_flow)
+
+    loss = rgb_loss*config.loss.rgb_lambda + L_corr*config.loss.correlation_lambda + \
+        disparity_loss*config.loss.disparity_loss_lambda + \
+        sparse_loss*config.loss.sparse_loss_lambda + \
+        (fwd_flow_loss + bwd_flow_loss) * config.loss.nerf_flow_loss_lambda + \
+        slow_loss*config.loss.slow_loss_lambda 
+
+    return {
+        "rgb_loss": rgb_loss,
+        "L_corr": L_corr,
+        "disparity_loss": disparity_loss,
+        "sparse_loss": sparse_loss,
+        "fwd_flow_loss": fwd_flow_loss,
+        "bwd_flow_loss": bwd_flow_loss,
+        "rgb_loss_psnr": rgb_loss_psnr,
+        "rgb_loss_corr_psnr": rgb_loss_corr_psnr,
+        "rgb_cur": l_curr,
+        "rgb_pre": l_bw,
+        "rgb_post": l_fw,
+        "rgb_cur_psnr": rgb_cur_psnr,
+        "rgb_pre_psnr": rgb_pre_psnr,
+        "rgb_post_psnr": rgb_post_psnr,
+        "total_loss": loss
+    }
+
 def freeze_parameters(model):
     for param in model.parameters():
         param.requires_grad = False
 def unfreeze_parameters(model):
     for param in model.parameters():
         param.requires_grad = True
+
+def run_net(*args, **kwargs):
+    print("hey that's strange")
+    pass
+
+def train_dynamic(run,models:dict,
+          train_loader,
+          optimizer_group:OptimizerGroup,
+          criterion,
+          config,
+          device):
+    torch.autograd.set_detect_anomaly(True)
+
+    dir_path = f"{config.checkpoint_dir}/{run.name}"
+    os.makedirs(dir_path, exist_ok=True)
+    # save config in checkpoint dir
+    with open(f"{dir_path}/config.json", "w") as f:
+        json.dump(config.to_dict(), f)
+    for model in models:
+        models[model].train()
+    total_batches = len(train_loader)*config.training.epochs
+    video_embedding = train_loader.dataset.get_video_embedding().to(device)
+    step = 0
+    with tqdm(total=total_batches, desc="Training") as pbar:
+        for _ in range(config.training.epochs):
+            for _, (index, rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, target) in enumerate(train_loader):
+                # if step % config.rendering.render_every == 0:
+                #     s = np.random.randint(0, train_loader.dataset.n_scenes)
+                #     t = np.random.randint(1, train_loader.dataset.n_images-1)
+                #     results = batchify_rays(train_loader, s, t, models, video_embedding, config, chunk=config.rendering.chunk, verbose=True, perturb=0, N_samples=64)
+                    
+                #     rgb = results["rgb_full"].reshape(train_loader.dataset.h, train_loader.dataset.w, 3)
+                #     gt_image = train_loader.dataset.images[s,t]*train_loader.dataset.images_masks[s,t]
+                #     images = torch.cat([rgb.permute(2,0,1).unsqueeze(0),gt_image.to(device=device).unsqueeze(0)],dim=0)
+                #     image = wandb.Image(
+                #         images ,
+                #         caption=f"Rendered image, scene {s} image {t}"
+                #     )
+                #     wandb.log({"render": image}, step=step)
+                
+                loss = 0
+                target = target.to(device)
+                optimizer_group.zero_grad()
+                scene_index, image_indices, _,_ = index
+                tensors_to_device = [scene_index,image_indices,rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask]
+                scene_index,image_indices,rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask = map(lambda x: x.to(device), tensors_to_device)
+                if (masks==0).all():
+                    continue
+                masks = masks.unsqueeze(-1)
+                target = target*masks  
+                
+                f_temp = models['video_downsampler'](video_embedding)
+                res = render_rays(rays_o, rays_d, models, f_temp, pose, intrinsics, image_indices,scene_index,config, chunk=config.rendering.chunk, verbose=False, perturb=1, N_samples=64,all_parts=True)                
+                losses = calculate_losses(res, target, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, disparity, pose, intrinsics, rays_d, criterion, config)
+                wandb.log(losses)
+                wandb.log({
+                    "lr_general": optimizer_group.get_lr()[0],
+                    "lr_ray_bender": optimizer_group.get_lr()[1],
+                    "batch_loss": losses["total_loss"].item()
+                })
+                loss = losses['total_loss']
+                loss.backward()
+                optimizer_group.step()
+                optimizer_group.scheduler_step()
+                pbar.set_postfix(
+                    {"rgb loss" : losses["rgb_loss_psnr"].item()})
+                pbar.update()
+                if step %config.save_models_every == 0:
+                    torch.save(models['ray_bending_estimator'].state_dict(), f"{dir_path}/ray_bending_estimator{step}.pt")
+                    torch.save(models['video_downsampler'].state_dict(), f"{dir_path}/video_downsampler_{step}.pt")
+                    torch.save(models['spatial_feature_aggregation'].state_dict(), f"{dir_path}/spatial_feature_aggregation_{step}.pt")
+                    torch.save(models['spatial_encoder'].state_dict(), f"{dir_path}/spatial_encoder_{step}.pt")
+                    torch.save(models['nerf'].state_dict(), f"{dir_path}/nerf_{step}.pt")
+                step += 1
+
+        torch.save(models['ray_bending_estimator'].state_dict(), f"{dir_path}/ray_bending_estimator.pt")
+        torch.save(models['video_downsampler'].state_dict(), f"{dir_path}/video_downsampler.pt")
+        torch.save(models['spatial_feature_aggregation'].state_dict(), f"{dir_path}/spatial_feature_aggregation.pt")
+        torch.save(models['spatial_encoder'].state_dict(), f"{dir_path}/spatial_encoder.pt")
+        torch.save(models['nerf'].state_dict(), f"{dir_path}/nerf.pt")
+
+        wandb.save(f"{dir_path}/ray_bending_estimator.pt")
+        wandb.save(f"{dir_path}/video_downsampler.pt")
+        wandb.save(f"{dir_path}/spatial_feature_aggregation.pt")
+        wandb.save(f"{dir_path}/spatial_encoder.pt")
+        wandb.save(f"{dir_path}/nerf.pt")
+    
+    run.finish()
+
+
 
 def train(run,ray_bender:PointTrajectoryNoODE,
           video_downsampler:VectorEncoder,
@@ -159,6 +252,7 @@ def train(run,ray_bender:PointTrajectoryNoODE,
             unfreeze_parameters(spatial_encoder)
         with tqdm(total=len(train_loader), desc=f"Epoch {epoch+1}/{config.training.epochs}") as pbar:
             for _, (index, rays_o, rays_d, bds, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, target) in enumerate(tqdm(train_loader)):
+                    
                 loss = 0
                 target = target.to(device)
                 optimizer_group.zero_grad()
@@ -358,158 +452,29 @@ def train(run,ray_bender:PointTrajectoryNoODE,
         # wandb.save(f"{dir_path}/static_encoder.pt")
     
     run.finish()
-def train_dynamic(run,models:dict,
-          train_loader,
-          optimizer_group:OptimizerGroup,
-          criterion,
-          config,
-          device):
-    torch.autograd.set_detect_anomaly(True)
 
-    dir_path = f"{config.checkpoint_dir}/{run.name}"
-    os.makedirs(dir_path, exist_ok=True)
-    # save config in checkpoint dir
-    with open(f"{dir_path}/config.json", "w") as f:
-        json.dump(config.to_dict(), f)
-    for model in models:
-        models[model].train()
-    total_batches = len(train_loader)*config.training.epochs
-    with tqdm(total=total_batches, desc="Training") as pbar:
-        for epoch in range(config.training.epochs):
-            for _, (index, rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, target) in enumerate(train_loader):
-                loss = 0
-                target = target.to(device)
-                optimizer_group.zero_grad()
-                scene_index, image_indices, y,x = index
-                tensors_to_device = [scene_index,image_indices,rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask]
-                scene_index,image_indices,rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask = map(lambda x: x.to(device), tensors_to_device)
-                if (masks==0).all():
-                    continue
-                masks = masks.unsqueeze(-1)
-                target = target*masks
-                
-                video_embedding = train_loader.dataset.get_video_embedding().to(device)
-                f_temp = models['video_downsampler'](video_embedding)
-                rays_o, rays_d = ndc_rays(train_loader.dataset.h, train_loader.dataset.w,
-                    intrinsics[:, 1, 0, 0], 1., rays_o, rays_d)
-                if (rays_o>100).any():
-                    assert False, "rays_o is too big"
-                near, far = 0 * torch.ones_like(rays_d[...,:1]), 1 * torch.ones_like(rays_d[...,:1])
+def create_dataset_and_networks(config):
+    dataset = CustomEncodingsImageDataset(config.data_folders,config,load_images=True)
+    networks = {}
+    video_embedding = dataset.get_video_embedding()
+    networks["video_downsampler"] = VectorEncoder(
+        video_embedding.shape[1], [256, 512], 256,normalize_output=False).to(device="cuda")
+    networks["spatial_encoder"] = VectorEncoder(256, [256, 512], 256).to(device="cuda")
+    networks["ray_bending_estimator"] = PointTrajectoryNoODE(3, 256).to(device="cuda")
+    networks["spatial_feature_aggregation"] = SpatialFeatureAggregation(dataset.image_encodings.shape[2],
+                                                                      256, dataset.image_encodings).to(device="cuda")
+    networks["nerf"] = NeRF(D=config.architecture.layer_count_dynamic,
+                          skips=config.architecture.dynamic_layer_skips,input_ch=256*2+60+10)\
+                        .to(device="cuda")
+    # networks["static_field_NeRF"] = NeRF(D=config.architecture.layer_count_static,skips=config.architecture.static_layer_skips,
+        # input_ch=256+60, dynamic=False).to(device="cuda")
+    # networks["static_encoder"] = VectorEncoder(512,[256],256,normalize_output=True).to(device="cuda")
+    return dataset,networks
 
-                points, z_vals = get_points_along_rays(
-                    rays_o, rays_d, near, far, False, config.perturb, config.architecture.n_samples)
-                trajectory = models['ray_bending_estimator'](
-                    points, f_temp, image_indices[:,1], scene_index[:,0], time_span=config.time_span)
-
-
-                points_pos_enc = positional_encoding(
-                    points.unsqueeze(-1)).reshape(points.shape[0], points.shape[1], -1)
-                time = image_indices[:,1].unsqueeze(1).unsqueeze(2).expand(-1,points.shape[1],-1).unsqueeze(-1)
-                time = positional_encoding(time,num_encodings = 5).reshape((points.shape[0], points.shape[1], -1))
-                pose = pose.unsqueeze(2).expand(-1,-1, config.architecture.n_samples, -1, -1)
-                intrinsics = intrinsics.unsqueeze(2).expand(-1,-1, config.architecture.n_samples, -1, -1)
-                
-                trajectory_2d = project_3d_to_image_coords(
-                    train_loader.dataset.h,train_loader.dataset.w, pose, intrinsics, trajectory)
-
-                f_sp, pre, cur, post = models['spatial_feature_aggregation'](
-                    trajectory_2d, config.image_size[0]//config.downscale, config.image_size[1]//config.downscale, (scene_index, image_indices))
-
-                f_temp = f_temp[scene_index[:,0]].unsqueeze(1).expand(-1,f_sp.shape[1],-1)
-
-                f_dy, f_dy_pre, f_dy_cur, f_dy_post = torch.cat([f_temp, f_sp], dim=-1),\
-                    torch.cat([f_temp, pre], dim=-1),\
-                    torch.cat([f_temp, cur], dim=-1),\
-                    torch.cat([f_temp, post], dim=-1)
-
-                points_encoded = torch.cat([points_pos_enc, f_dy,time], dim=-1)
-                points_encoded_pre = torch.cat(
-                    [points_pos_enc, f_dy_pre,time], dim=-1)
-                points_encoded_cur = torch.cat(
-                    [points_pos_enc, f_dy_cur,time], dim=-1)
-                points_encoded_post = torch.cat(
-                    [points_pos_enc, f_dy_post,time], dim=-1)
-                
-                outputs = models['nerf'](points_encoded)
-                outputs_pre = models['nerf'](points_encoded_pre)
-                outputs_cur = models['nerf'](points_encoded_cur)
-                outputs_post = models['nerf'](points_encoded_post)
-                
-                rgb_pre,*_ = raw2outputs(outputs_pre,z_vals,rays_d)
-                rgb_cur,*_ = raw2outputs(outputs_cur,z_vals,rays_d)
-                rgb_post,*_ = raw2outputs(outputs_post,z_vals,rays_d)
-                rgb, depth_map_full,weights_d,*_= raw2outputs(outputs, z_vals, rays_d)
-                
-                fwd_flow_loss = supervise_flows(trajectory[:,1],trajectory[:,2],outputs[...,3],fwd_flow,fwd_flow_mask,pose[:,2],intrinsics[:,2],z_vals,rays_d,criterion)
-                bwd_flow_loss = supervise_flows(trajectory[:,1],trajectory[:,0],outputs[...,3],bwd_flow,bwd_flow_mask,pose[:,0],intrinsics[:,0],z_vals,rays_d,criterion)
-
-                l_bw, l_curr, l_fw = criterion(rgb_pre, target), criterion(rgb_cur, target), criterion(rgb_post, target)
-
-                L_corr = (l_curr + l_bw + l_fw)/3
-                rgb_loss = criterion(rgb, target)
-                rgb_loss_psnr = mse2psnr(rgb_loss)
-                rgb_loss_corr_psnr = mse2psnr(L_corr)
-                rgb_pre_psnr, rgb_cur_psnr, rgb_post_psnr = mse2psnr(l_bw), mse2psnr(l_curr), mse2psnr(l_fw)
-                disparity_loss = compute_depth_loss(
-                    depth_map_full, -disparity)
-                sparse_loss = entropy(weights_d) 
-                slow_loss = L1_norm(fwd_flow) + L1_norm(bwd_flow)
-
-                loss = rgb_loss*config.loss.rgb_lambda + L_corr*config.loss.correlation_lambda + \
-                    disparity_loss*config.loss.disparity_loss_lambda + \
-                    sparse_loss*config.loss.sparse_loss_lambda + \
-                    (fwd_flow_loss + bwd_flow_loss) * config.loss.nerf_flow_loss_lambda + \
-                    slow_loss*config.loss.slow_loss_lambda 
-                lrs = optimizer_group.get_lr()
-                wandb.log({
-                    "rgb_loss": rgb_loss.item(),
-                    "L_corr": L_corr.item(),
-                    "disparity_loss": disparity_loss.item(),
-                    "sparse_loss": sparse_loss.item(),
-                    "fwd_flow_loss": fwd_flow_loss.item(),
-                    "bwd_flow_loss": bwd_flow_loss.item(),
-                    "rgb_loss_psnr": rgb_loss_psnr.item(),
-                    "rgb_loss_corr_psnr": rgb_loss_corr_psnr.item(),
-                    "rgb_cur": l_curr.item(),
-                    "rgb_pre": l_bw.item(),
-                    "rgb_post": l_fw.item(),
-                    "rgb_cur_psnr": rgb_cur_psnr.item(),
-                    "rgb_pre_psnr": rgb_pre_psnr.item(),
-                    "rgb_post_psnr": rgb_post_psnr.item(),
-                    "lr_general": lrs[0],
-                    "lr_ray_bender": lrs[1],
-                    "batch_loss": loss.item()
-                })
-                pbar.set_postfix(
-                    {"fwd_flow_loss" : fwd_flow_loss.item(), "bwd_flow_loss" : bwd_flow_loss.item()})
-
-                loss.backward()
-                optimizer_group.step()
-                optimizer_group.scheduler_step()
-                pbar.update()
-                # step += 1
-        if epoch %2 == 0:
-            torch.save(models['ray_bending_estimator'].state_dict(), f"{dir_path}/ray_bending_estimator{epoch}.pt")
-            torch.save(models['video_downsampler'].state_dict(), f"{dir_path}/video_downsampler_{epoch}.pt")
-            torch.save(models['spatial_feature_aggregation'].state_dict(), f"{dir_path}/spatial_feature_aggregation_{epoch}.pt")
-            torch.save(models['spatial_encoder'].state_dict(), f"{dir_path}/spatial_encoder_{epoch}.pt")
-            torch.save(models['nerf'].state_dict(), f"{dir_path}/nerf_{epoch}.pt")
-            
-        torch.save(models['ray_bending_estimator'].state_dict(), f"{dir_path}/ray_bending_estimator.pt")
-        torch.save(models['video_downsampler'].state_dict(), f"{dir_path}/video_downsampler.pt")
-        torch.save(models['spatial_feature_aggregation'].state_dict(), f"{dir_path}/spatial_feature_aggregation.pt")
-        torch.save(models['spatial_encoder'].state_dict(), f"{dir_path}/spatial_encoder.pt")
-        torch.save(models['nerf'].state_dict(), f"{dir_path}/nerf.pt")
-
-        wandb.save(f"{dir_path}/ray_bending_estimator.pt")
-        wandb.save(f"{dir_path}/video_downsampler.pt")
-        wandb.save(f"{dir_path}/spatial_feature_aggregation.pt")
-        wandb.save(f"{dir_path}/spatial_encoder.pt")
-        wandb.save(f"{dir_path}/nerf.pt")
-    
-    run.finish()
-
-
+def load_checkpoints(model_dict,checkpoint_dir):
+    for model_name in model_dict:
+        model_dict[model_name].load_state_dict(torch.load(os.path.join(checkpoint_dir,f"{model_name}.pt")))
+    return model_dict
 
 def project_trajectory_to_image_coords(config, pose, intrinsics, trajectory, trajectory_shape):
     # trajectory = rearrange(
@@ -530,31 +495,18 @@ def main():
     else:
         run.name = 'mononerf-{}'.format(datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
         config.run_name = run.name
+    dataset,models = create_dataset_and_networks(config)
+    # models = load_checkpoints(models,os.path.join(config.checkpoint_dir,"mononerf-2023-07-12_00-24-33"))
+    # models['ray_bending_estimator'].load_state_dict(torch.load("/home/yiftach/main/Research/MonoNeRF/checkpoints/mononerf-2023-07-12_11-25-56/ray_bending_estimator6000.pt"))
     # checkpoint_dir = "/home/yiftach/main/Research/MonoNeRF/checkpoints/dutiful-frog-612"
     dataloader = DataLoader(
         dataset, batch_size=config.batch_size,num_workers=config.num_workers, shuffle=True)
-    video_embedding = dataloader.dataset.get_video_embedding()
-    models = {}
-    models['video_downsampler'] = VectorEncoder(
-        video_embedding.shape[1], [256, 512], 256,normalize_output=False).to(device="cuda")
-    grad_params = list(models['video_downsampler'].parameters())
-    models['spatial_encoder'] = VectorEncoder(256, [256, 512], 256).to(device="cuda")
-    grad_params += list(models['spatial_encoder'].parameters())
-    models['ray_bending_estimator'] = PointTrajectoryNoODE(3, 256).to(device="cuda")
-    # ray_bending_estimator.load_state_dict(torch.load("/home/yiftach/main/Research/MonoNeRF/checkpoints/fancy-dust-735/ray_bender.pt"))
-
-    # grad_params += list(ray_bending_estimator.parameters())
-    models['spatial_feature_aggregation'] = SpatialFeatureAggregation(dataset.image_encodings.shape[2],
-        256, dataset.image_encodings).to(device="cuda")
+    
+    grad_params = list(models['nerf'].parameters())
     grad_params += list(models['spatial_feature_aggregation'].parameters())
-    models['nerf'] = NeRF(D=config.architecture.layer_count_dynamic,skips=config.architecture.dynamic_layer_skips,input_ch=256*2+60+10).to(device="cuda")
-    grad_params += list(models['nerf'].parameters())
-    models['static_field_NeRF'] = NeRF(D=config.architecture.layer_count_static,skips=config.architecture.static_layer_skips,
-        input_ch=256+60, dynamic=False).to(device="cuda")
-    grad_params += list(models['static_field_NeRF'].parameters())
-    models['static_encoder'] = VectorEncoder(dataset.image_encodings_static.shape[2],[256],256,normalize_output=True).to(device="cuda")
-    grad_params += list(models['static_encoder'].parameters())
-
+    grad_params += list(models['spatial_encoder'].parameters())
+    grad_params = list(models['video_downsampler'].parameters())
+    
     total_params = sum(p.numel() for p in grad_params)+sum(p.numel() for p in models['ray_bending_estimator'].parameters())
     formatted_params = format_number(total_params)
 
@@ -568,7 +520,7 @@ def main():
     print("---------------------------------------------------------------")
 
     part_percentages = []
-    for part in ['video_downsampler', 'spatial_encoder', 'ray_bending_estimator', 'spatial_feature_aggregation', 'nerf', 'static_field_NeRF', 'static_encoder']:
+    for part in ['video_downsampler', 'spatial_encoder', 'ray_bending_estimator', 'spatial_feature_aggregation', 'nerf']:
         part_params = sum(p.numel() for p in models[part].parameters())
         part_percentage = (part_params / total_params) * 100
         part_percentages.append((part, part_percentage))
@@ -597,11 +549,15 @@ def main():
     opt_group = OptimizerGroup()
     opt_group.add(optimizer_general)
     opt_group.add(optimizer_ray_bender,scheduler)
-    if config.training_mode=="static+dynamic":
-        train(ray_bending_estimator, video_downsampler, spa, spatial_encoder, nerf, static_field_NeRF,
-            static_encoder, dataloader, opt_group, torch.nn.MSELoss(reduction="none"), config, "cuda")
-    elif config.training_mode=="dynamic":
-        train_dynamic(run,models, dataloader, opt_group, torch.nn.MSELoss(), config, "cuda")
+    if config.network_training_function in globals() and callable(globals()[config.network_training_function]):
+        eval(config.network_training_function)(run,models, dataloader, opt_group, torch.nn.MSELoss(), config, "cuda")
+    else:
+        raise Exception("Function {} not found in module {}".format(config.network_training_function,__name__))
+    # if config.training_mode=="static+dynamic":
+        # train(ray_bending_estimator, video_downsampler, spa, spatial_encoder, nerf, static_field_NeRF,
+            # static_encoder, dataloader, opt_group, torch.nn.MSELoss(reduction="none"), config, "cuda")
+    # elif config.training_mode=="dynamic":
+        # train_dynamic(run,models, dataloader, opt_group, torch.nn.MSELoss(), config, "cuda")
 
 
 def format_number(number):

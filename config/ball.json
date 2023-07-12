@@ -2,11 +2,13 @@
     "data_folders": [
         "/home/yiftach/main/Research/MonoNeRF/data/Balloon1"
     ],
+    "forward_facing":true,
     "checkpoint_dir": "/home/yiftach/main/Research/MonoNeRF/checkpoints",
     "image_size": [
         540,
         960
     ],
+    "downscale": 2,
     "checkpoint": "checkpoints/ball",
     "batch_size": 1024,
     "num_workers": 4,
@@ -19,10 +21,9 @@
     "depth_epsilon": 1e-2,
     "experiment_name": "ball",
     "exp_group_name": "mononerf",
-    "n_samples_velocity_field": 8,
+    "network_training_function":"train_dynamic",
     "architecture":{
         "n_samples": 64,
-        "n_samples_nerf": 64,
         "layer_count_dynamic": 9,
         "layer_count_static": 9,
         "dynamic_layer_skips": [
@@ -36,7 +37,7 @@
         "rgb_lambda": 1,
         "rgb_dynamic_lambda": 0,
         "correlation_lambda": 0.1,
-        "rgb_static_lambda": 0.2,
+        "rgb_static_lambda": 0,
         "disparity_loss_lambda": 0.01,
         "blending_loss_lambda": 2e-5,
         "mask_constraint_lambda": 1e-2,
@@ -47,7 +48,7 @@
         "dynamicness_lambda":1e-4
     },
     "training":{
-        "epochs": 23,
+        "epochs": 12,
         "lr": 2.5e-4,
         "ray_bender_lr": 1e-3,
         "warmup_epochs": 0,
@@ -59,6 +60,9 @@
         ],
         "lr_gamma": 0.1
     },
-    "downscale": 2,
-    "training_mode": "dynamic"
+    "rendering":{
+        "render_every":10,
+        "chunk":1024
+    },
+    "save_models_every": 6000
 }
