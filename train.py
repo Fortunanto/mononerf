@@ -23,6 +23,7 @@ from util import positional_encoding, entropy, L2_norm, normalize, L1_norm, mse2
 from architecture.mononerf import *
 from torch.profiler import profile, record_function, ProfilerActivity
 from util.render_utils import raw2outputs,batchify_rays,render_rays
+from PIL import Image
 
 def check_parameters_changed(model, prev_parameters):
     current_parameters = copy.deepcopy(model.state_dict())
@@ -74,8 +75,8 @@ def compute_mask_flow_loss(blending_pre, blending_cur, blending_post):
     return L2_norm(blending_pre - blending_cur) + L2_norm(blending_cur - blending_post) + L2_norm(blending_pre - blending_post)
 
 def calculate_losses(res, target, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, disparity, pose, intrinsics, rays_d, criterion, config):
-    fwd_flow_loss = supervise_flows(res["trajectory_2d"][:,1],res["trajectory_2d"][:,2],res["output_full"][...,3],fwd_flow,fwd_flow_mask,pose[:,2],intrinsics[:,2],res["z_vals"],rays_d,criterion)
-    bwd_flow_loss = supervise_flows(res["trajectory_2d"][:,1],res["trajectory_2d"][:,0],res["output_full"][...,3],bwd_flow,bwd_flow_mask,pose[:,0],intrinsics[:,0],res["z_vals"],rays_d,criterion)
+    fwd_flow_loss = supervise_flows(res["trajectory"][:,1],res["trajectory"][:,2],res["output_full"][...,3],fwd_flow,fwd_flow_mask,pose[:,1],intrinsics[:,1],res["z_vals"],rays_d,criterion,forward_facing_scene=config.forward_facing)
+    bwd_flow_loss = supervise_flows(res["trajectory"][:,1],res["trajectory"][:,0],res["output_full"][...,3],bwd_flow,bwd_flow_mask,pose[:,1],intrinsics[:,1],res["z_vals"],rays_d,criterion,forward_facing_scene=config.forward_facing)
                             
     l_bw, l_curr, l_fw = criterion(res['rgb_pre'], target), criterion(res['rgb_cur'], target), criterion(res['rgb_post'], target)
     L_corr = (l_curr + l_bw + l_fw)/3
@@ -97,20 +98,20 @@ def calculate_losses(res, target, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_ma
         slow_loss*config.loss.slow_loss_lambda 
 
     return {
-        "rgb_loss": rgb_loss,
-        "L_corr": L_corr,
-        "disparity_loss": disparity_loss,
-        "sparse_loss": sparse_loss,
-        "fwd_flow_loss": fwd_flow_loss,
-        "bwd_flow_loss": bwd_flow_loss,
-        "rgb_loss_psnr": rgb_loss_psnr,
-        "rgb_loss_corr_psnr": rgb_loss_corr_psnr,
-        "rgb_cur": l_curr,
-        "rgb_pre": l_bw,
-        "rgb_post": l_fw,
-        "rgb_cur_psnr": rgb_cur_psnr,
-        "rgb_pre_psnr": rgb_pre_psnr,
-        "rgb_post_psnr": rgb_post_psnr,
+        "rgb_loss": rgb_loss.item(),
+        "L_corr": L_corr.item(),
+        "disparity_loss": disparity_loss.item(),
+        "sparse_loss": sparse_loss.item(),
+        "fwd_flow_loss": fwd_flow_loss.item(),
+        "bwd_flow_loss": bwd_flow_loss.item(),
+        "rgb_loss_psnr": rgb_loss_psnr.item(),
+        "rgb_loss_corr_psnr": rgb_loss_corr_psnr.item(),
+        "rgb_cur": l_curr.item(),
+        "rgb_pre": l_bw.item(),
+        "rgb_post": l_fw.item(),
+        "rgb_cur_psnr": rgb_cur_psnr.item(),
+        "rgb_pre_psnr": rgb_pre_psnr.item(),
+        "rgb_post_psnr": rgb_post_psnr.item(),
         "total_loss": loss
     }
 
@@ -146,19 +147,6 @@ def train_dynamic(run,models:dict,
     with tqdm(total=total_batches, desc="Training") as pbar:
         for _ in range(config.training.epochs):
             for _, (index, rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, target) in enumerate(train_loader):
-                # if step % config.rendering.render_every == 0:
-                #     s = np.random.randint(0, train_loader.dataset.n_scenes)
-                #     t = np.random.randint(1, train_loader.dataset.n_images-1)
-                #     results = batchify_rays(train_loader, s, t, models, video_embedding, config, chunk=config.rendering.chunk, verbose=True, perturb=0, N_samples=64)
-                    
-                #     rgb = results["rgb_full"].reshape(train_loader.dataset.h, train_loader.dataset.w, 3)
-                #     gt_image = train_loader.dataset.images[s,t]*train_loader.dataset.images_masks[s,t]
-                #     images = torch.cat([rgb.permute(2,0,1).unsqueeze(0),gt_image.to(device=device).unsqueeze(0)],dim=0)
-                #     image = wandb.Image(
-                #         images ,
-                #         caption=f"Rendered image, scene {s} image {t}"
-                #     )
-                #     wandb.log({"render": image}, step=step)
                 
                 loss = 0
                 target = target.to(device)
@@ -168,11 +156,34 @@ def train_dynamic(run,models:dict,
                 scene_index,image_indices,rays_o, rays_d,pose,intrinsics, masks, disparity, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask = map(lambda x: x.to(device), tensors_to_device)
                 if (masks==0).all():
                     continue
-                masks = masks.unsqueeze(-1)
+
+                # if step % config.rendering.render_every == 0:
+                #     for s in range(train_loader.dataset.n_scenes):
+                #         t = np.random.randint(1, train_loader.dataset.n_images-1)
+                #         results = batchify_rays(train_loader, s, t, models, video_embedding, config, chunk=config.rendering.chunk, verbose=True, perturb=0, N_samples=64)
+                #         scene_name = train_loader.dataset.scene_names[s]
+                #         rgb = results["rgb_full"].reshape(train_loader.dataset.h, train_loader.dataset.w, 3)
+                #         gt_image = train_loader.dataset.images[s,t]*train_loader.dataset.images_masks[s,t]
+                #         fwd_flow_img = train_loader.dataset.flows_fwd_images[s,t]*train_loader.dataset.images_masks[s,t]
+                #         bwd_flow_img = train_loader.dataset.flows_bwd_images[s,t-1]*train_loader.dataset.images_masks[s,t]
+                #         images = [rgb,gt_image.to(device=device).permute(1,2,0),fwd_flow_img.to(device=device).permute(1,2,0),bwd_flow_img.to(device=device).permute(1,2,0)]
+                #         rgb_im = [Image.fromarray((image.cpu().numpy() * 255).astype(np.uint8)).convert('RGB') for image in images]
+                #         os.makedirs(os.path.join("results",config.run_name), exist_ok=True)
+                #         image_path_render = os.path.join("results",config.run_name,f'{scene_name}_{t}.png')
+                #         image_path_gt = os.path.join("results",config.run_name,f'{scene_name}_{t}_gt.png')
+                #         image_path_fwd_flow = os.path.join("results",config.run_name,f'{scene_name}_{t}_fwd_flow.png')
+                #         image_path_bwd_flow = os.path.join("results",config.run_name,f'{scene_name}_{t}_bwd_flow.png')
+                #         rgb_im[0].save(image_path_render)
+                #         rgb_im[1].save(image_path_gt)
+                #         rgb_im[2].save(image_path_fwd_flow)
+                #         rgb_im[3].save(image_path_bwd_flow)
+                #         wandb.log({"render vs gt and flows": [wandb.Image(im,caption=f"{scene_name} at {t}") for im in rgb_im]})
+                        
+                masks = masks.unsqueeze(1)
                 target = target*masks  
                 
                 f_temp = models['video_downsampler'](video_embedding)
-                res = render_rays(rays_o, rays_d, models, f_temp, pose, intrinsics, image_indices,scene_index,config, chunk=config.rendering.chunk, verbose=False, perturb=1, N_samples=64,all_parts=True)                
+                res = render_rays(rays_o, rays_d, models, f_temp, pose, intrinsics, image_indices,scene_index,config, chunk=config.rendering.chunk, verbose=False, perturb=config.perturb, N_samples=64,all_parts=True,forward_facing_scene=config.forward_facing)                
                 losses = calculate_losses(res, target, fwd_flow, fwd_flow_mask, bwd_flow, bwd_flow_mask, disparity, pose, intrinsics, rays_d, criterion, config)
                 wandb.log(losses)
                 wandb.log({
@@ -182,10 +193,12 @@ def train_dynamic(run,models:dict,
                 })
                 loss = losses['total_loss']
                 loss.backward()
+                losses['total_loss'] = loss.item()
                 optimizer_group.step()
                 optimizer_group.scheduler_step()
                 pbar.set_postfix(
-                    {"rgb loss" : losses["rgb_loss_psnr"].item()})
+                    {"rgb loss" : losses["rgb_loss_psnr"]})
+                step+=1
                 pbar.update()
                 if step %config.save_models_every == 0:
                     torch.save(models['ray_bending_estimator'].state_dict(), f"{dir_path}/ray_bending_estimator{step}.pt")
@@ -193,7 +206,6 @@ def train_dynamic(run,models:dict,
                     torch.save(models['spatial_feature_aggregation'].state_dict(), f"{dir_path}/spatial_feature_aggregation_{step}.pt")
                     torch.save(models['spatial_encoder'].state_dict(), f"{dir_path}/spatial_encoder_{step}.pt")
                     torch.save(models['nerf'].state_dict(), f"{dir_path}/nerf_{step}.pt")
-                step += 1
 
         torch.save(models['ray_bending_estimator'].state_dict(), f"{dir_path}/ray_bending_estimator.pt")
         torch.save(models['video_downsampler'].state_dict(), f"{dir_path}/video_downsampler.pt")
@@ -487,7 +499,7 @@ def project_trajectory_to_image_coords(config, pose, intrinsics, trajectory, tra
 
 def main():
     config = get_config()
-    dataset = CustomEncodingsImageDataset(config.data_folders,config)
+    # dataset = CustomEncodingsImageDataset(config.data_folders,config)
 
     run = wandb.init(project="mononerf", config=config.to_dict())  
     if hasattr(config,"run_name"):
@@ -500,12 +512,12 @@ def main():
     # models['ray_bending_estimator'].load_state_dict(torch.load("/home/yiftach/main/Research/MonoNeRF/checkpoints/mononerf-2023-07-12_11-25-56/ray_bending_estimator6000.pt"))
     # checkpoint_dir = "/home/yiftach/main/Research/MonoNeRF/checkpoints/dutiful-frog-612"
     dataloader = DataLoader(
-        dataset, batch_size=config.batch_size,num_workers=config.num_workers, shuffle=True)
+        dataset, batch_size=config.batch_size,num_workers=config.num_workers, shuffle=False)
     
     grad_params = list(models['nerf'].parameters())
     grad_params += list(models['spatial_feature_aggregation'].parameters())
     grad_params += list(models['spatial_encoder'].parameters())
-    grad_params = list(models['video_downsampler'].parameters())
+    grad_params += list(models['video_downsampler'].parameters())
     
     total_params = sum(p.numel() for p in grad_params)+sum(p.numel() for p in models['ray_bending_estimator'].parameters())
     formatted_params = format_number(total_params)

@@ -35,6 +35,7 @@ def get_rays_from_points(points, K, c2w):
 
 def get_rays_np(H, W, K, c2w):
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    
     dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
 
     # Rotate ray directions from camera frame to the world frame
@@ -135,9 +136,9 @@ def near_far_from_sphere(rays_o, rays_d):
     far = mid + 1.0
     return near, far
 
-def project_3d_to_image_coords(h,w, pose, intrinsics, trajectory,forward_facing_scene = True):
+def project_3d_to_image_coords(h,w, pose, intrinsics, trajectory,forward_facing_scene = True,**kwargs):
     if forward_facing_scene:
-        trajectory_world = NDC2world(trajectory,h,w, intrinsics[...,0,0].unsqueeze(-1))
+        trajectory_world = NDC2world(trajectory,h,w, intrinsics[...,0,0:1])
     else:
         trajectory_world = trajectory
     trajectory_2d = project_3d_to_2d(trajectory_world, pose,intrinsics)

@@ -189,16 +189,17 @@ def batchify_rays(train_loader, s, t, models, video_embedding, config, chunk=102
 
 def render_rays(rays_o,rays_d,networks,f_temp,pose,intrinsics,image_indices,scene_indices,config,all_parts=False,**kwargs):
     result = {}
-    h,w = config.image_size[0]//config.downscale,config.image_size[1]//config.downscale
+    h,w = 360,340
     near, far = 0 * torch.ones_like(rays_d[:,:1]), 1 * torch.ones_like(rays_d[:,:1])
     points, z_vals = get_points_along_rays(
         rays_o, rays_d, near, far, False, **kwargs)
     trajectory = networks['ray_bending_estimator'](
         points, f_temp, image_indices[:,1], scene_indices, 3)
+    result["trajectory"] = trajectory
     pose_batch = pose.unsqueeze(2).expand(-1,-1, 64, -1, -1)
     intrinsics_batch = intrinsics.unsqueeze(2).expand(-1,-1, 64, -1, -1)
     trajectory_2d = project_3d_to_image_coords(
-        h,w, pose_batch, intrinsics_batch, trajectory.float()) 
+        h,w, pose_batch, intrinsics_batch, trajectory.float(),**kwargs) 
     result["trajectory_2d"] = trajectory_2d
     points_pos_enc = positional_encoding(
         points.unsqueeze(-1)).reshape(points.shape[0], points.shape[1], -1)

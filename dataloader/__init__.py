@@ -18,68 +18,6 @@ from tqdm import tqdm
 import torch.nn.functional as F
 import cv2 as cv
 from util.ray_helpers import get_rays_np,ndc_rays_np,get_rays,ndc_rays
-slowfast_alpha = 4
-create_compose = lambda mean, std, crop_size,side_size: Compose( [
-            Lambda(lambda x: x/255.0),
-            NormalizeVideo(mean, std),
-            ShortSideScale(
-                size=side_size
-            ),
-            CenterCropVideo(crop_size),
-            PackPathway()
-        ])
-
-
-class PackPathway(torch.nn.Module):
-    """
-    Transform for converting video frames as a list of tensors. 
-    """
-    def __init__(self):
-        super().__init__()
-        
-    def forward(self, frames: torch.Tensor):
-        frame_count = frames.shape[1]
-        cond = False
-        if frame_count//32>0:
-            cond = True
-            batch_size = frame_count//32
-            frames = frames[:,0:batch_size*32,:,:].reshape(batch_size,frames.shape[0],32,frames.shape[2],frames.shape[3])
-        else:
-            batch_size = 1
-            frames = frames.unsqueeze(0)
-        fast_pathway = frames
-        frames = frames.to(device="cpu")
-        # assert False, f"frames.shape {frames.shape}, frame_count {frame_count}"
-        # Perform temporal sampling from the fast pathway.
-        slow_pathway = torch.index_select(
-                frames,
-                2,
-                torch.linspace(
-                    0, frames.shape[2] - 1, frames.shape[2] // slowfast_alpha
-                ).long(),
-        )
-        frame_list = [slow_pathway.to(device="cuda"), fast_pathway]
-        return frame_list
-
-
-    # Custom dataset to load images from a directory without class-wise subdirectories
-    class CustomImageDataset(torch.utils.data.Dataset):
-        def __init__(self, data_dir, transform=None):
-            self.data_dir = data_dir
-            self.transform = transform
-            self.image_paths = [os.path.join(data_dir, filename) for filename in os.listdir(data_dir)]
-
-        def __len__(self):
-            return len(self.image_paths)
-
-        def __getitem__(self, index):
-            image_path = self.image_paths[index]
-            image = Image.open(image_path).convert('RGB')
-
-            if self.transform is not None:
-                image = self.transform(image)
-
-            return image
 
 
 
@@ -118,15 +56,6 @@ def load_disparities_as_tensor(directory):
     disparities = np.stack(disparities)
     return disparities
 
-
-# def load_and_process_flows(directories, flow_direction,interpolation,downscale):
-#     flows = [load_flows_as_tensor(os.path.join(dir, "flow"), flow_direction) for dir in directories]
-#     interpolation_func = lambda x: interpolation(x,downscale)
-#     fl = torch.from_numpy(np.array(extract_flows(flows,interpolation_func))).float()
-#     fl = fl.index_select(2,torch.tensor([1,0]))
-#     masks =  torch.from_numpy(np.array(extract_masks(flows,interpolation_func))).float()
-#     return fl,masks
-
 def load_and_process_flows(directories, flow_direction,interpolation,downscale):
     flows = [load_flows_as_tensor(os.path.join(dir, "flow"), flow_direction) for dir in directories]
     interpolation_func = lambda x: interpolation(x,downscale)
@@ -148,23 +77,6 @@ def extract_flows(flows_list,interpolation_func):
 
 def extract_masks(flows_list,interpolation_func):
     return [[interpolation_func(flow[1][np.newaxis,...]) for flow in flows] for flows in flows_list]
-
-def prepare_for_slowfast(tensor, mean, std, crop_size,device="cpu"):
-    transforms = create_compose(mean, std, crop_size,400)
-    [slow,fast] = transforms(tensor)
-    [slow,fast] = [slow.to(device),fast.to(device)]
-    # tensor = tensor.reshape(tensor.shape[0],tensor.shape[1]*tensor.shape[2],tensor.shape[3],tensor.shape[4])
-    return [slow,fast]
-
-def map_to_indices(index,shape):
-    a,_,c,d = shape
-    a_index = index // (c * d)
-    rem = index % (c * d)
-    c_index = rem // d
-    d_index = rem % d
-
-    indices = (a_index, c_index, d_index)
-    # assert False, f"index {index}, indices {indices}, shape {shape}"
 
 def viewmatrix(z, up, pos):
     vec2 = normalize(z)
@@ -198,6 +110,8 @@ def interpolate(images,downscale_factor):
         is_numpy = False
     if len(images.shape)<4:
         images = images.unsqueeze(1)
+    # interpolation = images[]
+    # interpolation = images[...,140:500,220:560]
     interpolation = F.interpolate(images, scale_factor=1/downscale_factor, mode="bilinear", align_corners=False).squeeze()
     if is_numpy:
         interpolation = interpolation.numpy()
@@ -218,30 +132,6 @@ def recenter_poses(poses):
     poses = poses_
     return poses
 
-
-# This function is borrowed from IDR: https://github.com/lioryariv/idr
-def load_K_Rt_from_P(filename, P=None):
-    if P is None:
-        lines = open(filename).read().splitlines()
-        if len(lines) == 4:
-            lines = lines[1:]
-        lines = [[x[0], x[1], x[2], x[3]] for x in (x.split(" ") for x in lines)]
-        P = np.asarray(lines).astype(np.float32).squeeze()
-    out = cv.decomposeProjectionMatrix(P)
-    K = out[0]
-    R = out[1]
-    t = out[2]
-    
-    K = K / K[2, 2]
-    intrinsics = np.eye(4)
-    intrinsics[:3, :3] = K
-
-    pose = np.eye(4, dtype=np.float32)
-    pose[:3, :3] = R.transpose()
-    pose[:3, 3] = (t[:3] / t[3])[:, 0]
-
-    return intrinsics, pose
-
 def calculate_sc(pose_bound,bd_factor):
     return 1. if bd_factor is None else 1./(np.percentile(pose_bound[:, -2], 5) * bd_factor)
 
@@ -249,7 +139,92 @@ def calculate_sc(pose_bound,bd_factor):
 import itertools
 class CustomEncodingsImageDataset(torch.utils.data.Dataset):
     def __init__(self, dirs,config,bd_factor=.9, transform=None,load_images=True):
+        if config.dataset_type == "dynamic scene dataset":
+           self.__load_dynamic_scene_dataset(dirs,config,bd_factor,transform,load_images)
+        else:
+           self.__load_pacnerf_dataset(dirs,config,bd_factor,transform,load_images)
+
+        self.indices = list(itertools.product(range(0,self.n_scenes), range(0,self.n_images),range(1,self.h-1),range(1,self.w-1)))        
+        # self.indices = list(itertools.product(range(0,self.n_scenes), range(3,5),range(self.h//2,self.h//2+90),range(self.w//2,self.w//2+90)))        
+        scene_ray_o = []
+        scene_ray_d = []
+        for scene in range(self.n_scenes):
+            images_ray_o = []
+            images_ray_d = []
+            for image in range(self.n_images):
+                intrinsic = self.intrinsics[scene][image].cpu().detach().numpy()
+                pose = self.poses[scene][image].cpu().detach().numpy()
+                rays_o,rays_d = get_rays_np(self.h, self.w, intrinsic, pose)
+                if config.forward_facing:
+                    rays_o, rays_d = ndc_rays_np(self.h, self.w,
+                        intrinsic[0,0], 1., rays_o, rays_d)
+                rays_o = rays_o.transpose(2,0,1)
+                rays_d = rays_d.transpose(2,0,1)
+                images_ray_o.append(rays_o)
+                images_ray_d.append(rays_d)
+            scene_ray_o.append(images_ray_o)
+            scene_ray_d.append(images_ray_d)
+        self.rays_o_np = np.array(scene_ray_o)
+        self.rays_d_np = np.array(scene_ray_d)
+        # object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
+        # object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
+
+        # self.object_bbox_min = object_bbox_min[:, None]
+        # self.object_bbox_max = object_bbox_max[:, None] 
+    def __load_pacnerf_dataset(self,dirs,config,bd_factor=.9, transform=None,load_images=True):
+        self.data_dir = [os.path.join(dir,"2") for dir in dirs]
+        self.scene_names = [os.path.basename(os.path.normpath(dir)) for dir in dirs]
+        self.embedding_dirs = [os.path.join(dir,"embeddings") for dir in self.data_dir]
+        self.image_dirs = [os.path.join(dir,"images") for dir in self.data_dir]
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.disparities = torch.stack([interpolate(torch.Tensor(load_disparities_as_tensor(os.path.join(dir,"disp"))),config.downscale) for dir in self.data_dir])    
+        self.flows_fwd = torch.stack([interpolate(torch.load(os.path.join(os.path.join(dir,"flows","forward","flows.pt"))),config.downscale) for dir in self.data_dir]).detach().to(device="cpu")
+        self.flows_bwd = torch.stack([interpolate(torch.load(os.path.join(os.path.join(dir,"flows","backward","flows.pt"))),config.downscale) for dir in self.data_dir]).detach().to(device="cpu")
+        self.flows_fwd.requires_grad = False
+        self.flows_bwd.requires_grad = False
+        self.images = torch.stack([interpolate(torch.Tensor(load_images_as_tensor(dir).transpose(1,0,2,3)),config.downscale)/255 for dir in self.image_dirs])
+        self.flows_fwd_images = torch.stack([interpolate(torch.Tensor(load_images_as_tensor(os.path.join(dir,"flows","forward")).transpose(1,0,2,3)),config.downscale)/255 for dir in self.data_dir])
+        self.flows_bwd_images = torch.stack([interpolate(torch.Tensor(load_images_as_tensor(os.path.join(dir,"flows","backward")).transpose(1,0,2,3)),config.downscale)/255 for dir in self.data_dir])
+
+        self.images_masks = torch.stack([interpolate(torch.Tensor(load_images_as_tensor(os.path.join(dir,"masks"))),config.downscale) for dir in self.data_dir])
+        self.images_masks = (self.images_masks  >128).float()
+        self.image_encodings = [F.interpolate(torch.load(os.path.join(dir, "image_embeddings_dynamic.pt"))[...,70:250,110:280],mode="bilinear",scale_factor=2) for dir in self.embedding_dirs]
+        self.image_encodings = torch.stack(self.image_encodings)
+        mean = self.image_encodings.min(dim=-1,keepdim=True)[0].min(dim=-2,keepdim=True)[0].min(dim=1,keepdim=True)[0]
+        std = self.image_encodings.max(dim=-1,keepdim=True)[0].max(dim=-2,keepdim=True)[0].max(dim=1,keepdim=True)[0]
+        mask = (std==0).expand_as(std)
+        std[mask] = 1
+        self.image_encodings = (self.image_encodings - mean) / std
+        self.h,self.w=self.images.shape[-2],self.images.shape[-1]
+        self.n_images = self.images.shape[1]
+        self.n_scenes = self.images.shape[0]
+        self.video_embeddings = [torch.load(os.path.join(dir, "video_embeddings.pt")).squeeze().to(device="cpu") for dir in self.embedding_dirs]
+        # self.video_embeddings = [(enc - enc.mean()) for enc in self.video_embeddings]
+        # self.video_embeddings = torch.stack([(enc /enc.max()) for enc in self.video_embeddings])
+        self.video_embeddings = torch.stack(self.video_embeddings)
+        self.video_embeddings = self.video_embeddings.detach()
+        self.video_embeddings.requires_grad_(False)        
+        poses = np.array([np.load(os.path.join(dir, "c2ws.npy")) for dir in self.data_dir])
+        # sc = np.array([1. if bd_factor is None else calculate_sc(pose_bound,bd_factor) for pose_bound in poses_bounds]).reshape(-1,1,1)
+
+        # poses[...,:3,3] *= sc
+        # poses = np.concatenate([poses[..., 1:2],
+                        #    -poses[..., 0:1],
+                            # poses[...,2:]], -1)
+        last_row = np.array([0,0,0,1])
+        self.poses = torch.Tensor(np.concatenate([poses, np.tile(last_row, [poses.shape[0],poses.shape[1],1,1])], axis=2))
+        intrinsics = np.array([np.load(os.path.join(dir, "intrinsics.npy")) for dir in self.data_dir])
+        
+        self.intrinsics = torch.Tensor(intrinsics)
+        # self.intrinsics[...,0,2] = self.images[
+        # self.intrinsics[...,0,0]= self.intrinsics[...,0,0]
+        # self.intrinsics[...,1,1]= self.intrinsics[...,1,1]
+        self.intrinsics[...,0,2]= self.images.shape[-1]/2
+        self.intrinsics[...,1,2]= self.images.shape[-2]/2
+        print("done loading dataset")
+    def __load_dynamic_scene_dataset(self,dirs,config,bd_factor=.9, transform=None,load_images=True):
         self.data_dir = [os.path.join(dir,"data") for dir in dirs]
+        self.scene_names = [os.path.basename(os.path.normpath(dir)) for dir in dirs]
         self.embedding_dirs = [os.path.join(dir,"embeddings") for dir in dirs]
         self.image_dirs = [os.path.join(dir,"images") for dir in dirs]
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -264,6 +239,8 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
             self.image_encodings = torch.stack(self.image_encodings)
             mean = self.image_encodings.min(dim=-1,keepdim=True)[0].min(dim=-2,keepdim=True)[0].min(dim=1,keepdim=True)[0]
             std = self.image_encodings.max(dim=-1,keepdim=True)[0].max(dim=-2,keepdim=True)[0].max(dim=1,keepdim=True)[0]
+            mask = (std==0).expand_as(std)
+            std[mask] = 1
             self.image_encodings = (self.image_encodings - mean) / std
             self.h,self.w=self.images.shape[-2],self.images.shape[-1]
             self.n_images = self.images.shape[1]
@@ -299,40 +276,15 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
                            -poses[..., 0:1],
                             poses[...,2:]], -1)
         poses = np.stack([recenter_poses(pose) for pose in poses])[...,:-1]
+        # poses = np.stack([pose for pose in poses])[...,:-1]
+
         last_row = np.array([0,0,0,1])
         self.poses = torch.Tensor(np.concatenate([poses, np.tile(last_row, [poses.shape[0],poses.shape[1],1,1])], axis=2))
         self.intrinsics = torch.Tensor(np.array([[np.array([[hwf[2], 0, hwf[1]/2,0],[0, hwf[2], hwf[0]/2,0],[0, 0, 1,0],[0,0,0,1]]) for hwf in scene] for scene  in hwfs]))
         self.bds = torch.Tensor(poses_bounds[:,:, -2:])
         
 
-        self.indices = list(itertools.product(range(0,self.n_scenes), range(0,self.n_images),range(1,self.h-1),range(1,self.w-1)))        
-        # self.indices = list(itertools.product(range(0,2), range(4,5),range(self.h//2,self.h//2+90),range(self.w//2,self.w//2+90)))        
-    #    def get_rays_np(H, W, K, c2w):
-        scene_ray_o = []
-        scene_ray_d = []
-        for scene in range(self.n_scenes):
-            images_ray_o = []
-            images_ray_d = []
-            for image in range(self.n_images):
-                intrinsic = self.intrinsics[scene][image].cpu().detach().numpy()
-                pose = self.poses[scene][image].cpu().detach().numpy()
-                rays_o,rays_d = get_rays_np(self.h, self.w, intrinsic, pose)
-                if config.forward_facing:
-                    rays_o, rays_d = ndc_rays_np(self.h, self.w,
-                        intrinsic[0,0], 1., rays_o, rays_d)
-                rays_o = rays_o.transpose(2,0,1)
-                rays_d = rays_d.transpose(2,0,1)
-                images_ray_o.append(rays_o)
-                images_ray_d.append(rays_d)
-            scene_ray_o.append(images_ray_o)
-            scene_ray_d.append(images_ray_d)
-        self.rays_o_np = np.array(scene_ray_o)
-        self.rays_d_np = np.array(scene_ray_d)
-        # object_bbox_min = np.array([-1.01, -1.01, -1.01, 1.0])
-        # object_bbox_max = np.array([ 1.01,  1.01,  1.01, 1.0])
 
-        # self.object_bbox_min = object_bbox_min[:, None]
-        # self.object_bbox_max = object_bbox_max[:, None] 
     def get_pose_intrinsics(self, scene_indices,image_indices):
         # assert False, f"scene_indices  min {scene_indices.min()} max {scene_indices.max()} image_indices min {image_indices.min()} max {image_indices.max()}"
         return self.poses[scene_indices,image_indices],self.intrinsics[scene_indices,image_indices]
@@ -363,10 +315,10 @@ class CustomEncodingsImageDataset(torch.utils.data.Dataset):
         image_mask = self.images_masks[scene_index,image_index,y,x]
         disparity = self.disparities[scene_index,image_index,y,x]
         rgb = self.images[scene_index,image_index,:,y,x]
-        fwd_flow = self.flows_fwd[scene_index,image_index,:,y,x] if image_index<=10 else torch.zeros(2).float()
-        fwd_flow_mask = self.flows_fwd_masks[scene_index,image_index,y,x] if image_index<=10 else torch.zeros(1).float().squeeze()
-        bwd_flow = self.flows_bwd[scene_index,image_index-1,:,y,x] if image_index>0 else torch.zeros(2).float()
-        bwd_flow_mask = self.flows_bwd_masks[scene_index,image_index-1,y,x] if image_index>0 else torch.zeros(1).float().squeeze()
+        fwd_flow = self.flows_fwd[scene_index,image_index,:,y,x] if image_index< self.n_images-1 else torch.zeros(2).float()
+        fwd_flow_mask = self.images_masks[scene_index,image_index,y,x] if image_index<=self.n_images-1 else torch.zeros(1).float().squeeze()
+        bwd_flow = self.flows_bwd[scene_index,image_index,:,y,x] if image_index>0 else torch.zeros(2).float()
+        bwd_flow_mask = self.images_masks[scene_index,image_index,y,x] if image_index>0 else torch.zeros(1).float().squeeze()
         return ind,rays_o,rays_d,pose,intrinsic,image_mask,disparity,fwd_flow,fwd_flow_mask,bwd_flow,bwd_flow_mask,rgb
         # assert False, f"rgb {rgb} image_encoding {image_encoding.shape} image_mask {image_mask} rays_o {rays_o} rays_d {rays_d}"
         
@@ -380,7 +332,7 @@ if __name__ == "__main__":
     dataset = CustomEncodingsImageDataset(config.data_folders,config)
     loader = torch.utils.data.DataLoader(dataset, batch_size=1024, shuffle=True)
     for a in loader:
-        print(a[3].shape)
+        print(a)
         # assert False, f"item.shape {item.shape}"
 #     # Print the shape of the images tensor
 #     print(images.shape)

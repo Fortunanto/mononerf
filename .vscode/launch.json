@@ -4,12 +4,22 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Python: Current File",
             "type": "python",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: match masks",
+            "type": "python",
+            "request": "launch",
+            "program": "preprocess/match_masks.py",
+            "console": "integratedTerminal",
+            "args":["--data_path","/home/yiftach/main/Research/MonoNeRF/data/pac_nerf_data/bird/1","--mask_path","/home/yiftach/main/Research/MonoNeRF/data/pac_nerf_data/bird/disp_png"],
             "justMyCode": true
         },
         {
@@ -31,7 +41,7 @@
             "program": "${workspaceFolder}/dataloader/__init__.py",
             "args": [
                 "--config",
-                "config/ball.json"
+                "config/pacnerf_bird.json"
             ],
             "console": "integratedTerminal",
             "justMyCode": true
@@ -43,7 +53,7 @@
             "program": "${workspaceFolder}/render.py",
             "args": [
                 "--config",
-                "config/ball.json"
+                "config/pacnerf_bird.json"
             ],
             "console": "integratedTerminal",
             "justMyCode": true

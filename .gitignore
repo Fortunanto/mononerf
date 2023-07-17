@@ -207,4 +207,6 @@ pyrightconfig.json
 .ionide
 wandb/*
 checkpoints/*
+results/*
+temp/*
 # End of https://www.toptal.com/developers/gitignore/api/data,python,visualstudiocode

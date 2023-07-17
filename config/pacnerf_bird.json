@@ -1,15 +1,14 @@
 {
     "data_folders": [
-        "/home/yiftach/main/Research/MonoNeRF/data/Balloon1",
-        "/home/yiftach/main/Research/MonoNeRF/data/Umbrella"
+        "/home/yiftach/main/Research/MonoNeRF/data/pac_nerf_data/bird"
 
     ],
-    "forward_facing":true,
+    "forward_facing":false,
     "checkpoint_dir": "/home/yiftach/main/Research/MonoNeRF/checkpoints",
-    "dataset_type":"dynamic scene dataset",
+    "dataset_type":"PAC NeRF Dataset",
     "image_size": [
-        540,
-        960
+        800,
+        800
     ],
     "downscale": 2,
     "checkpoint": "checkpoints/ball",
@@ -51,9 +50,9 @@
         "dynamicness_lambda":1e-4
     },
     "training":{
-        "epochs": 12,
+        "epochs": 20,
         "lr": 2.5e-4,
-        "ray_bender_lr": 1e-3,
+        "ray_bender_lr": 1e-5,
         "warmup_epochs": 0,
         "t_max": 1500,
         "eta_min": 1e-5,

@@ -49,11 +49,12 @@ def interpolate_feature_map(points,h,w,indices,features):
     wb = ((points[:,1]-y0x1[:,0])*(y0x1[:,1]-points[:,0])).unsqueeze(1)
     wc = ((y1x0[:,0]-points[:,1])*(points[:,0]-y1x0[:,1])).unsqueeze(1)
     wd = ((y1x1[:,0]-points[:,1])*(y1x1[:,1]-points[:,0])).unsqueeze(1)
-
     interp_features = wa * features_topleft + wb * features_topright + wc * features_bottomleft + wd * features_bottomright
-    if torch.isnan(interp_features).any():
-        assert False, f"interp_features: {interp_features}"
-    return (mask.unsqueeze(1)*interp_features).reshape(*out_shape,-1)
+    interp_features[(1-mask).bool()] = 0
+    # out = torch.zeros_like(interp_features)
+    # out[mask.bool()] = interp_features[mask.bool()]
+    return interp_features.reshape(*out_shape,-1)
+    
 # except:
     #     assert False, f"y0x0[:,0] max {y0x0[:,0].max()} min {y0x0[:,0].min()} y0x0[:,1] max {y0x0[:,1].max()} min {y0x0[:,1].min()} y0x1 \
     #     [:,0] max {y0x1[:,0].max()} min {y0x1[:,0].min()} y0x1[:,1] max {y0x1[:,1].max()} min {y0x1[:,1].min()} y1x0[:,0] max {y1x0[:,0].max()} min \
@@ -65,7 +66,11 @@ def get_interpolation_indices(points,h,w):
     x0 = torch.floor(points[...,0]).long()
 
     x1 = x0 + 1
-    mask = (((y0 < 0) | (y1 >= h) | (x0 < 0) | (x1 >= w))).int()
+    mask = (((y0 < 0) | (y1 >= h) | (x0 < 0) | (x1 >= w) | torch.isinf(points[...,0]) | torch.isinf(points[...,1]))).int()
+
+    # if torch.isinf(points).any():
+    #     assert False, f"points: {points}"
+
     x0 = torch.clamp(x0,0,w-1)
     x1 = torch.clamp(x1,0,w-1)
     y0 = torch.clamp(y0,0,h-1)
@@ -167,15 +172,16 @@ def project_3d_to_2d_batch(points_3d, intrinsic_matrix, pose_matrix):
     # Swap coordinates to match (row, column) format and return
     return torch.stack([points_2d[:, 1], points_2d[:, 0]], dim=-1)
 
-# def compute_2d_displacements(points_start,points_end, intrinsic_matrices,pose_matrices, time_step=1):
+def compute_2d_displacements(points_start,points_end, intrinsic_matrices,pose_matrices, time_step=1):
 #     # Project 3D points to 2D
-#     points_2d = project_3d_to_2d(points_start,pose_matrices, intrinsic_matrices)
-#     next_points_2d = project_3d_to_2d(points_end, pose_matrices,intrinsic_matrices)
+    points_2d = project_3d_to_2d(points_start,pose_matrices, intrinsic_matrices)
+    next_points_2d = project_3d_to_2d(points_end, pose_matrices,intrinsic_matrices)
 #     # assert not points_3d.isnan().any(), f"Points_3d has NaN values: {points_3d}"
 #     # assert not points_2d.isnan().any(), f"Points_2d has NaN values: {points_2d}"
 #     # assert not next_points_2d.isnan().any(), f"Next_points_2d has NaN values: {next_points_2d}"
 #     # Compute 2D displacements
-#     return displacements_2d
+    displacements_2d = next_points_2d - points_2d
+    return displacements_2d
 
 if __name__ == "__main__":
     point = torch.randint(200,400,size=(10,2)).to(device="cuda")
